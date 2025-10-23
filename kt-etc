@@ -1,0 +1,342 @@
+const html = `<!DOCTYPE html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ETC产品型号选择器</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #1a2a6c, #2c3e50);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            width: 100%;
+            max-width: 900px;
+            background-color: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+        
+        header {
+            background: linear-gradient(to right, #3498db, #1a5f9e);
+            color: white;
+            padding: 25px 30px;
+            text-align: center;
+        }
+        
+        header h1 {
+            font-size: 2.2rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+        
+        header h1 i {
+            font-size: 1.8rem;
+        }
+        
+        .subtitle {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+        
+        .content {
+            display: flex;
+            padding: 30px;
+            gap: 30px;
+        }
+        
+        .selection-section {
+            flex: 1;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 25px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+        }
+        
+        .result-section {
+            flex: 1;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 25px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        
+        .section-title {
+            color: #2c3e50;
+            font-size: 1.4rem;
+            margin-bottom: 25px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #3498db;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .form-group {
+            margin-bottom: 25px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #34495e;
+            font-size: 1.1rem;
+        }
+        
+        select {
+            width: 100%;
+            padding: 14px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            background-color: white;
+            transition: all 0.3s;
+            outline: none;
+        }
+        
+        select:focus {
+            border-color: #3498db;
+            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+        }
+        
+        .result-card {
+            background: linear-gradient(135deg, #3498db, #1a5f9e);
+            color: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+        }
+        
+        .result-item {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+        }
+        
+        .result-item:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+        
+        .result-label {
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1.1rem;
+        }
+        
+        .result-value {
+            font-size: 1.3rem;
+            font-weight: 600;
+            padding: 10px 15px;
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 8px;
+            min-height: 50px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .note {
+            background: #f1c40f;
+            color: #2c3e50;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+        
+        footer {
+            text-align: center;
+            padding: 20px;
+            color: #7f8c8d;
+            font-size: 0.95rem;
+            background: #ecf0f1;
+            border-top: 1px solid #ddd;
+        }
+        
+        .highlight {
+            color: #e74c3c;
+            font-weight: 700;
+        }
+        
+        @media (max-width: 768px) {
+            .content {
+                flex-direction: column;
+            }
+            
+            header h1 {
+                font-size: 1.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><i class="fas fa-microchip"></i> ETC产品型号配置系统</h1>
+            <div class="subtitle">选择网关类型和天线类型，自动获取产品配置信息</div>
+        </header>
+        
+        <div class="content">
+            <div class="selection-section">
+                <h2 class="section-title"><i class="fas fa-cog"></i> 配置参数</h2>
+                
+                <div class="form-group">
+                    <label for="gateway-type"><i class="fas fa-network-wired"></i> ETC网关类型</label>
+                    <select id="gateway-type">
+                        <option value="">-- 请选择网关类型 --</option>
+                        <option value="金溢T5N">金溢T5N</option>
+                        <option value="通行宝网关(感动网关)">通行宝网关(感动网关)</option>
+                        <option value="云网关">云网关</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="antenna-type"><i class="fas fa-wifi"></i> ETC天线类型</label>
+                    <select id="antenna-type">
+                        <option value="">-- 请选择天线类型 --</option>
+                        <option value="T7">T7天线</option>
+                    </select>
+                </div>
+                
+                <div class="note">
+                    <i class="fas fa-info-circle"></i> <strong>配置说明：</strong> 目前只支持T7天线类型。根据选择的网关类型，系统将自动显示对应的对接模式、产品型号和非标号。
+                </div>
+            </div>
+            
+            <div class="result-section">
+                <h2 class="section-title"><i class="fas fa-list-alt"></i> 产品信息</h2>
+                
+                <div class="result-card">
+                    <div class="result-item">
+                        <div class="result-label"><i class="fas fa-exchange-alt"></i> 对接模式</div>
+                        <div id="mode" class="result-value">请选择网关和天线类型</div>
+                    </div>
+                    
+                    <div class="result-item">
+                        <div class="result-label"><i class="fas fa-qrcode"></i> 软件产品型号</div>
+                        <div id="product-model" class="result-value">-</div>
+                    </div>
+                    
+                    <div class="result-item">
+                        <div class="result-label"><i class="fas fa-barcode"></i> 非标号</div>
+                        <div id="non-standard" class="result-value">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>ETC产品型号配置系统 &copy; 2025 | Powered by weizhen | Mail: vip.weizhen@gmail.com</p>
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const gatewaySelect = document.getElementById('gateway-type');
+            const antennaSelect = document.getElementById('antenna-type');
+            const modeDisplay = document.getElementById('mode');
+            const productModelDisplay = document.getElementById('product-model');
+            const nonStandardDisplay = document.getElementById('non-standard');
+            
+            // 配置映射关系
+            const configMap = {
+                "金溢T5N": {
+                    "T7": {
+                        mode: "总对总",
+                        productModel: "KT-SF-RJ-ETC-JY",
+                        nonStandard: "FB_1055723"
+                    }
+                },
+                "云网关": {
+                    "T7": {
+                        mode: "单点",
+                        productModel: "KT-SF-RJ-ETCFB-SQYWG",
+                        nonStandard: "FB_1123372"
+                    }
+                },
+                "通行宝网关(感动网关)": {
+                    "T7": {
+                        mode: "单点",
+                        productModel: "KT-SF-RJ-ETCFB-JSTXB",
+                        nonStandard: "FB_1043719"
+                    }
+                }
+            };
+            
+            // 更新结果函数
+            function updateResults() {
+                const gateway = gatewaySelect.value;
+                const antenna = antennaSelect.value;
+                
+                if (gateway && antenna) {
+                    const config = configMap[gateway]?.[antenna];
+                    
+                    if (config) {
+                        modeDisplay.textContent = config.mode;
+                        productModelDisplay.textContent = config.productModel;
+                        nonStandardDisplay.textContent = config.nonStandard;
+                    } else {
+                        modeDisplay.textContent = "未找到匹配配置";
+                        productModelDisplay.textContent = "-";
+                        nonStandardDisplay.textContent = "-";
+                    }
+                } else {
+                    modeDisplay.textContent = "请选择网关和天线类型";
+                    productModelDisplay.textContent = "-";
+                    nonStandardDisplay.textContent = "-";
+                }
+            }
+            
+            // 添加事件监听
+            gatewaySelect.addEventListener('change', updateResults);
+            antennaSelect.addEventListener('change', updateResults);
+            
+            // 初始化显示
+            updateResults();
+        });
+    </script>
+    
+    </body>`
+
+    async function handleRequest(request) {
+      return new Response(html, {
+        headers: {
+          "content-type": "text/html;charset=UTF-8",
+        },
+      })
+    }
+    
+    
+    
+    addEventListener("fetch", event => {
+      return event.respondWith(handleRequest(event.request))
+    })
+    
+    
