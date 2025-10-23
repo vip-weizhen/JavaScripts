@@ -1,0 +1,54 @@
+addEventListener('fetch', event => {
+    event.respondWith(handleRequest(event.request))
+  })
+  
+  async function handleRequest(request) {
+    try {
+      // 目标 URL
+      const targetUrl = 'https://raw.githubusercontent.com/Guovin/iptv-api/gd/output/result.m3u';
+      
+      // 创建自定义请求头
+      const headers = new Headers({
+        'User-Agent': 'okHttp/Mod-1.0.1'
+      });
+  
+      // 发起代理请求
+      const response = await fetch(targetUrl, {
+        headers: headers,
+        redirect: 'follow'
+      });
+  
+      // 处理响应
+      const results = await gatherResponse(response);
+      
+      // 返回响应（添加 CORS 头）
+      return new Response(results, {
+        status: response.status,
+        headers: {
+          'Content-Type': response.headers.get('Content-Type') || 'text/plain',
+          'Access-Control-Allow-Origin': '*' // 允许所有域名跨域访问
+        }
+      });
+      
+    } catch (error) {
+      // 错误处理
+      return new Response(JSON.stringify({
+        error: error.message
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+  
+  // 处理不同响应类型
+  async function gatherResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return await response.json();
+    } else if (contentType.includes('text')) {
+      return await response.text();
+    } else {
+      return await response.arrayBuffer();
+    }
+  }
