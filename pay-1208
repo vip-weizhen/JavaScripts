@@ -1,0 +1,215 @@
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // === 配置 ===
+    const API_URL = "https://kp-open.keytop.cn/unite-api/api/wec/";
+    const APP_ID = "10685";
+    const APP_SECRET = "";
+    const PARK_ID = "1208";
+
+    // MD5工具
+    async function md5(str) {
+      const data = new TextEncoder().encode(str);
+      const digest = await crypto.subtle.digest("MD5", data);
+      return Array.from(new Uint8Array(digest))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase();
+    }
+
+    // 生成签名
+    async function genSign(params) {
+      const filtered = Object.keys(params)
+        .filter(k => params[k] !== null && params[k] !== "" && k !== "appId" && k !== "appSecret")
+        .sort()
+        .map(k => `${k}=${params[k]}`)
+        .join("&");
+      return await md5(filtered + "&" + APP_SECRET);
+    }
+
+    // 获取北京时间 yyyy-MM-dd HH:mm:ss
+    function getBeijingTime() {
+      const now = new Date();
+      const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+      const bj = new Date(utc + 8 * 3600 * 1000);
+      return bj.toISOString().replace("T", " ").substring(0, 19);
+    }
+
+    // === API：查询欠费 ===
+    if (url.pathname.endsWith("/api/query") && request.method === "POST") {
+      try {
+        const { plateNo } = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "getParkingPaymentInfo",
+          ts,
+          reqId,
+          plateNo,
+          freeTime: "0",
+          freeMoney: "0"
+        };
+        params.key = await genSign(params);
+
+        const res = await fetch(API_URL + "GetParkingPaymentInfo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", version: "1.0.0" },
+          body: JSON.stringify(params)
+        });
+
+        const txt = await res.text();
+        return new Response(txt, { headers: { "Content-Type": "application/json;charset=utf-8" } });
+      } catch (err) {
+        return new Response(JSON.stringify({ resCode: "-1", resMsg: "Worker内部错误", err: String(err) }), {
+          headers: { "Content-Type": "application/json;charset=utf-8" }
+        });
+      }
+    }
+
+    // === API：缴费 ===
+    if (url.pathname.endsWith("/api/pay") && request.method === "POST") {
+      try {
+        const { orderNo, payableAmount } = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+        const payTime = getBeijingTime();  // 改为北京时间
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "payParkingFee",
+          ts,
+          reqId,
+          orderNo,
+          payableAmount: payableAmount.toString(),
+          payTime,
+          amount: payableAmount.toString(),
+          payType: "1010",
+          payMethod: "1004",
+          freeMoney: "0",
+          freeTime: "0",
+          isNoSense: "0"
+        };
+        params.key = await genSign(params);
+
+        const res = await fetch(API_URL + "PayParkingFee", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", version: "1.0.0" },
+          body: JSON.stringify(params)
+        });
+
+        const txt = await res.text();
+        return new Response(txt, { headers: { "Content-Type": "application/json;charset=utf-8" } });
+      } catch (err) {
+        return new Response(JSON.stringify({ resCode: "-1", resMsg: "Worker内部错误", err: String(err) }), {
+          headers: { "Content-Type": "application/json;charset=utf-8" }
+        });
+      }
+    }
+
+    // === 默认页面 ===
+    return new Response(`
+      <!DOCTYPE html>
+      <html lang="zh">
+      <head>
+        <meta charset="UTF-8"/>
+        <title>科拓测试车场查询缴费</title>
+        <style>
+          body { font-family: sans-serif; text-align:center; padding:40px; }
+          input { padding:8px; font-size:16px; }
+          button { padding:8px 16px; margin:5px; font-size:16px; cursor:pointer; }
+          table { margin:20px auto; border-collapse:collapse; width:80%; max-width:600px; }
+          th, td { border:1px solid #ccc; padding:8px; text-align:left; }
+          th { background:#f8f8f8; }
+          #result { margin-top:20px; }
+        </style>
+      </head>
+      <body>
+        <h2>科拓测试车场查询缴费</h2>
+        <input id="plate" placeholder="请输入车牌号"/>
+        <button onclick="query()">查询</button>
+        <button id="payBtn" onclick="pay()" disabled>缴费</button>
+        <div id="result"></div>
+
+        <script>
+          let lastOrderNo = null;
+          let lastPayable = 0;
+          const payBtn = document.getElementById("payBtn");
+
+          function isJson(str){
+            try { JSON.parse(str); return true; } catch { return false; }
+          }
+
+          async function query(){
+            const plate = document.getElementById("plate").value;
+            let res = await fetch("./api/query", {
+              method:"POST",
+              headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({plateNo:plate})
+            });
+            let txt = await res.text();
+            let box = document.getElementById("result");
+
+            if(isJson(txt)){
+              let obj = JSON.parse(txt);
+              if(obj.resCode === "0" && obj.data){
+                let data = JSON.parse(obj.data);
+                lastOrderNo = data.orderNo;
+                lastPayable = data.payable;
+                payBtn.disabled = lastPayable <= 0;
+
+                box.innerHTML = \`
+                  <table>
+                    <tr><th>车场ID</th><td>\${data.parkId}</td></tr>
+                    <tr><th>账单号</th><td>\${data.orderNo}</td></tr>
+                    <tr><th>车牌号</th><td>\${data.plateNo}</td></tr>
+                    <tr><th>卡号/票号</th><td>\${data.cardNo || "-"}</td></tr>
+                    <tr><th>车场名称</th><td>\${data.parkName}</td></tr>
+                    <tr><th>入场时间</th><td>\${data.entryTime}</td></tr>
+                    <tr><th>停车时长</th><td>\${data.elapsedTime} 分钟</td></tr>
+                    <tr><th>停车总金额</th><td>\${data.totalAmount} 分</td></tr>
+                    <tr><th>应缴金额</th><td>\${data.payable} 分</td></tr>
+                  </table>
+                \`;
+              } else {
+                box.innerHTML = "<p style='color:red'>未找到车辆信息</p>";
+                payBtn.disabled = true;
+              }
+            } else {
+              box.innerHTML = "<p style='color:red'>接口返回异常：<br>" + txt + "</p>";
+              payBtn.disabled = true;
+            }
+          }
+
+          async function pay(){
+            if(!lastOrderNo || lastPayable <= 0){ alert("没有可缴费用"); return; }
+            let res = await fetch("./api/pay", {
+              method:"POST",
+              headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({orderNo:lastOrderNo, payableAmount:lastPayable})
+            });
+            let txt = await res.text();
+            let box = document.getElementById("result");
+
+            if(isJson(txt)){
+              let obj = JSON.parse(txt);
+              if(obj.resCode === "0"){
+                box.innerHTML = "<h3 style='color:green'>✅ 缴费完成！</h3>";
+                payBtn.disabled = true;
+              } else {
+                box.innerHTML = "<p style='color:red'>缴费失败：" + obj.resMsg + "</p>";
+              }
+            } else {
+              box.innerHTML = "<p style='color:red'>缴费返回异常：<br>" + txt + "</p>";
+            }
+          }
+        </script>
+      </body>
+      </html>
+    `, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+  }
+}
