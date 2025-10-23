@@ -1,0 +1,51 @@
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request))
+})
+
+async function handleRequest(request) {
+  try {
+    const targetUrl = 'https://iptvindex.com/db.json';
+    const headers = new Headers({
+      'Content-Type': 'application/json'
+    });
+
+    const response = await fetch(targetUrl, {
+      headers: headers,
+      redirect: 'follow'
+    });
+
+    const results = await gatherResponse(response);
+
+    // 判断返回类型，如果是对象就转成 JSON 字符串
+    const body = typeof results === 'object'
+      ? JSON.stringify(results)
+      : results;
+
+    return new Response(body, {
+      status: response.status,
+      headers: {
+        'Content-Type': response.headers.get('Content-Type') || 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      error: error.message
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+async function gatherResponse(response) {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return await response.json();
+  } else if (contentType.includes('text')) {
+    return await response.text();
+  } else {
+    return await response.arrayBuffer();
+  }
+}
