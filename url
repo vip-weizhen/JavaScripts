@@ -1,0 +1,175 @@
+export default {
+  async fetch(request, env) {
+    const { pathname } = new URL(request.url);
+
+    if (request.method === "POST" && pathname === "/shorten") {
+      const data = await request.json();
+      let { url, customCode } = data;
+
+      if (!url || !/^https?:\/\//.test(url)) {
+        return new Response(JSON.stringify({ error: "请输入合法的网址" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 400,
+        });
+      }
+
+      let shortCode = customCode || Math.random().toString(36).substring(2, 8);
+
+      // 检查自定义短码是否已存在
+      if (await env.url.get(shortCode)) {
+        return new Response(JSON.stringify({ error: "短码已存在，请换一个" }), {
+          headers: { "Content-Type": "application/json" },
+          status: 400,
+        });
+      }
+
+      await env.url.put(shortCode, url);
+      return new Response(JSON.stringify({ shortUrl: `${new URL(request.url).origin}/${shortCode}` }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // 短链跳转逻辑
+    if (pathname !== "/") {
+      const code = pathname.slice(1);
+      const target = await env.url.get(code);
+      if (target) {
+        return Response.redirect(target, 302);
+      }
+      return new Response("短链不存在", { status: 404 });
+    }
+
+    // 前端页面
+    return new Response(
+      `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>短链生成器</title>
+  <style>
+    body {
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #74ebd5 0%, #ACB6E5 100%);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      padding: 30px 25px;
+      border-radius: 16px;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+      width: 100%;
+      max-width: 400px;
+      text-align: center;
+    }
+    h1 {
+      margin-bottom: 20px;
+      font-size: 1.6em;
+      color: #333;
+    }
+    input {
+      width: 100%;
+      padding: 12px;
+      margin: 10px 0;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      font-size: 15px;
+    }
+    button {
+      width: 100%;
+      padding: 12px;
+      margin-top: 10px;
+      background: #4a90e2;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+    button:hover {
+      background: #357ABD;
+    }
+    .result {
+      margin-top: 20px;
+      word-wrap: break-word;
+      display: none;
+    }
+    .short-url {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 10px;
+      background: #f4f4f4;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    .copy-btn {
+      background: #34c759;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    @media (max-width: 480px) {
+      .container {
+        padding: 20px;
+      }
+      h1 {
+        font-size: 1.3em;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔗 短链生成器</h1>
+    <input type="text" id="urlInput" placeholder="输入网址 (必须以 http:// 或 https:// 开头)" />
+    <input type="text" id="customInput" placeholder="自定义短码 (可选)" />
+    <button onclick="shortenUrl()">生成短链</button>
+    <div class="result" id="resultBox">
+      <p>✅ 生成成功：</p>
+      <div class="short-url">
+        <span id="shortUrl"></span>
+        <button class="copy-btn" onclick="copyUrl()">复制</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    async function shortenUrl() {
+      const url = document.getElementById("urlInput").value.trim();
+      const customCode = document.getElementById("customInput").value.trim();
+      if (!url) return alert("请输入网址");
+      const res = await fetch("/shorten", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, customCode })
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+      } else {
+        document.getElementById("shortUrl").textContent = data.shortUrl;
+        document.getElementById("resultBox").style.display = "block";
+      }
+    }
+    function copyUrl() {
+      const text = document.getElementById("shortUrl").textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        alert("已复制到剪贴板！");
+      });
+    }
+  </script>
+</body>
+</html>`,
+      { headers: { "Content-Type": "text/html;charset=UTF-8" } }
+    );
+  }
+};
