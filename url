@@ -1,36 +1,137 @@
+// ============================================================
+// CF Worker 短链服务 + 管理后台
+// 使用方式：
+//   1. 将此文件内容粘贴到 Cloudflare Workers 编辑器
+//   2. 在 wrangler.toml 或 Workers 控制台绑定 KV 命名空间，变量名为 url
+//   3. 修改下方 ADMIN_TOKEN，作为管理后台的访问密码
+// ============================================================
+
+const ADMIN_TOKEN = "wabjtam!"; 
+
 export default {
   async fetch(request, env) {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname } = url;
 
-    if (request.method === "POST" && pathname === "/shorten") {
-      const data = await request.json();
-      let { url, customCode } = data;
+    // ── 跨域头（可按需修改）──────────────────────────────────
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    };
 
-      if (!url || !/^https?:\/\//.test(url)) {
-        return new Response(JSON.stringify({ error: "请输入合法的网址" }), {
-          headers: { "Content-Type": "application/json" },
-          status: 400,
-        });
-      }
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
 
-      let shortCode = customCode || Math.random().toString(36).substring(2, 8);
-
-      // 检查自定义短码是否已存在
-      if (await env.url.get(shortCode)) {
-        return new Response(JSON.stringify({ error: "短码已存在，请换一个" }), {
-          headers: { "Content-Type": "application/json" },
-          status: 400,
-        });
-      }
-
-      await env.url.put(shortCode, url);
-      return new Response(JSON.stringify({ shortUrl: `${new URL(request.url).origin}/${shortCode}` }), {
-        headers: { "Content-Type": "application/json" },
+    // ── 鉴权辅助函数 ─────────────────────────────────────────
+    function authFail() {
+      return new Response(JSON.stringify({ error: "未授权，token 错误" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json", ...corsHeaders },
       });
     }
 
-    // 短链跳转逻辑
-    if (pathname !== "/") {
+    function checkAuth() {
+      const auth = request.headers.get("Authorization") || "";
+      return auth === `Bearer ${ADMIN_TOKEN}`;
+    }
+
+    // ── POST /shorten：生成短链 ───────────────────────────────
+    if (request.method === "POST" && pathname === "/shorten") {
+      const data = await request.json();
+      let { url: longUrl, customCode } = data;
+
+      if (!longUrl || !/^https?:\/\//.test(longUrl)) {
+        return new Response(JSON.stringify({ error: "请输入合法的网址（需以 http:// 或 https:// 开头）" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+
+      let shortCode = customCode?.trim() || Math.random().toString(36).substring(2, 8);
+
+      // 校验自定义短码格式
+      if (customCode && !/^[a-zA-Z0-9_-]+$/.test(customCode)) {
+        return new Response(JSON.stringify({ error: "短码只能包含字母、数字、- 和 _" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+
+      // 检查是否重复
+      if (await env.url.get(shortCode)) {
+        return new Response(JSON.stringify({ error: "短码已存在，请换一个" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+
+      await env.url.put(shortCode, longUrl);
+
+      return new Response(
+        JSON.stringify({ shortUrl: `${new URL(request.url).origin}/${shortCode}`, code: shortCode }),
+        { headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+
+    // ── GET /admin/list：列出所有短链（需鉴权）──────────────
+    if (request.method === "GET" && pathname === "/admin/list") {
+      if (!checkAuth()) return authFail();
+
+      const list = await env.url.list();
+      const items = await Promise.all(
+        list.keys.map(async (k) => ({
+          code: k.name,
+          url: await env.url.get(k.name),
+        }))
+      );
+
+      return new Response(JSON.stringify({ items, total: items.length }), {
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      });
+    }
+
+    // ── POST /admin/delete：批量删除（需鉴权）───────────────
+    if (request.method === "POST" && pathname === "/admin/delete") {
+      if (!checkAuth()) return authFail();
+
+      const { codes } = await request.json();
+      if (!Array.isArray(codes) || codes.length === 0) {
+        return new Response(JSON.stringify({ error: "codes 不能为空" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+
+      await Promise.all(codes.map((code) => env.url.delete(code)));
+
+      return new Response(JSON.stringify({ ok: true, deleted: codes.length }), {
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      });
+    }
+
+    // ── POST /admin/update：修改目标网址（需鉴权）───────────
+    if (request.method === "POST" && pathname === "/admin/update") {
+      if (!checkAuth()) return authFail();
+
+      const { code, newUrl } = await request.json();
+      if (!code || !newUrl || !/^https?:\/\//.test(newUrl)) {
+        return new Response(JSON.stringify({ error: "参数错误" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders },
+        });
+      }
+
+      await env.url.put(code, newUrl);
+
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      });
+    }
+
+    // ── 短链跳转 ─────────────────────────────────────────────
+    if (pathname !== "/" && pathname !== "/admin") {
       const code = pathname.slice(1);
       const target = await env.url.get(code);
       if (target) {
@@ -39,137 +140,526 @@ export default {
       return new Response("短链不存在", { status: 404 });
     }
 
-    // 前端页面
-    return new Response(
-      `<!DOCTYPE html>
+    // ── 前端页面 ─────────────────────────────────────────────
+    return new Response(HTML, {
+      headers: { "Content-Type": "text/html;charset=UTF-8" },
+    });
+  },
+};
+
+// ============================================================
+// 前端 HTML（含生成短链 + 管理后台，单文件部署）
+// ============================================================
+const HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>短链生成器</title>
   <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
       background: linear-gradient(135deg, #74ebd5 0%, #ACB6E5 100%);
+      min-height: 100vh;
       display: flex;
       justify-content: center;
-      align-items: center;
-      height: 100vh;
-      margin: 0;
-      padding: 20px;
+      align-items: flex-start;
+      padding: 40px 16px;
     }
+
     .container {
-      background: white;
-      padding: 30px 25px;
-      border-radius: 16px;
-      box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+      background: #fff;
+      border-radius: 18px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.13);
       width: 100%;
-      max-width: 400px;
-      text-align: center;
+      max-width: 520px;
+      overflow: hidden;
     }
-    h1 {
-      margin-bottom: 20px;
-      font-size: 1.6em;
-      color: #333;
+
+    /* ── Tab 栏 ── */
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid #eee;
     }
-    input {
+    .tab-btn {
+      flex: 1;
+      padding: 14px;
+      background: none;
+      border: none;
+      font-size: 15px;
+      cursor: pointer;
+      color: #888;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .tab-btn.active {
+      color: #4a90e2;
+      border-bottom-color: #4a90e2;
+      font-weight: 600;
+    }
+
+    /* ── Panel ── */
+    .panel { display: none; padding: 28px 24px; }
+    .panel.active { display: block; }
+
+    h1 { font-size: 1.4em; color: #333; text-align: center; margin-bottom: 20px; }
+
+    /* ── 表单元素 ── */
+    label { display: block; font-size: 13px; color: #666; margin-bottom: 5px; margin-top: 14px; }
+    input[type="text"], input[type="password"] {
       width: 100%;
-      padding: 12px;
-      margin: 10px 0;
+      padding: 10px 12px;
       border: 1px solid #ddd;
       border-radius: 10px;
-      font-size: 15px;
+      font-size: 14px;
+      color: #333;
+      outline: none;
+      transition: border-color 0.2s;
     }
-    button {
+    input[type="text"]:focus, input[type="password"]:focus {
+      border-color: #4a90e2;
+      box-shadow: 0 0 0 3px rgba(74,144,226,0.12);
+    }
+
+    .btn {
+      display: block;
       width: 100%;
       padding: 12px;
-      margin-top: 10px;
+      margin-top: 16px;
       background: #4a90e2;
-      color: white;
+      color: #fff;
       border: none;
       border-radius: 10px;
-      font-size: 16px;
+      font-size: 15px;
       cursor: pointer;
-      transition: background 0.3s;
+      transition: background 0.2s;
     }
-    button:hover {
-      background: #357ABD;
-    }
-    .result {
-      margin-top: 20px;
-      word-wrap: break-word;
+    .btn:hover { background: #357ABD; }
+    .btn:active { background: #2a6099; }
+    .btn-green { background: #34c759; }
+    .btn-green:hover { background: #28a745; }
+    .btn-danger { background: #ff3b30; }
+    .btn-danger:hover { background: #cc2f26; }
+
+    /* ── 结果框 ── */
+    .result-box {
       display: none;
+      margin-top: 16px;
+      background: #f4f9ff;
+      border: 1px solid #cde;
+      border-radius: 10px;
+      padding: 14px;
     }
-    .short-url {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      margin-top: 10px;
-      padding: 10px;
-      background: #f4f4f4;
-      border-radius: 8px;
+    .result-box p { font-size: 13px; color: #555; margin-bottom: 8px; }
+    .short-url-row { display: flex; align-items: center; gap: 8px; }
+    .short-url-row span {
+      flex: 1;
       font-size: 14px;
+      color: #4a90e2;
+      word-break: break-all;
     }
     .copy-btn {
+      padding: 6px 12px;
       background: #34c759;
-      padding: 6px 10px;
-      border-radius: 6px;
+      color: #fff;
+      border: none;
+      border-radius: 7px;
       font-size: 13px;
       cursor: pointer;
+      white-space: nowrap;
     }
+    .copy-btn:hover { background: #28a745; }
+
+    /* ── 管理面板 ── */
+    .admin-login { max-width: 320px; margin: 0 auto; }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .toolbar input[type="text"] { flex: 1; min-width: 140px; margin-top: 0; }
+    .del-selected-btn {
+      padding: 9px 14px;
+      background: #ff3b30;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .del-selected-btn:disabled { background: #ccc; cursor: default; }
+    .del-selected-btn:not(:disabled):hover { background: #cc2f26; }
+    .select-info { font-size: 13px; color: #888; }
+
+    .table-wrap {
+      border: 1px solid #eee;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th {
+      background: #f7f8fa;
+      padding: 10px 10px;
+      text-align: left;
+      color: #888;
+      font-weight: 600;
+      border-bottom: 1px solid #eee;
+    }
+    td {
+      padding: 10px 10px;
+      border-bottom: 1px solid #f0f0f0;
+      vertical-align: middle;
+      color: #333;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #fafbff; }
+    .code-td { font-family: monospace; color: #4a90e2; font-size: 13px; }
+    .url-td {
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #666;
+    }
+    .row-del-btn {
+      padding: 4px 10px;
+      background: none;
+      border: 1px solid #ff3b30;
+      color: #ff3b30;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .row-del-btn:hover { background: #fff0ef; }
+    .row-edit-btn {
+      padding: 4px 10px;
+      background: none;
+      border: 1px solid #4a90e2;
+      color: #4a90e2;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      margin-right: 4px;
+    }
+    .row-edit-btn:hover { background: #f0f6ff; }
+    .empty-tip { text-align: center; padding: 30px; color: #bbb; font-size: 14px; }
+    .loading-tip { text-align: center; padding: 30px; color: #aaa; font-size: 14px; }
+    .total-tip { font-size: 13px; color: #999; margin-bottom: 10px; }
+
+    /* ── 行内编辑输入 ── */
+    .edit-input {
+      width: 100%;
+      padding: 4px 7px;
+      border: 1px solid #4a90e2;
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+    }
+    .save-btn {
+      padding: 4px 10px;
+      background: #34c759;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      margin-right: 4px;
+    }
+    .cancel-btn {
+      padding: 4px 10px;
+      background: none;
+      border: 1px solid #bbb;
+      color: #888;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
     @media (max-width: 480px) {
-      .container {
-        padding: 20px;
-      }
-      h1 {
-        font-size: 1.3em;
-      }
+      body { padding: 16px 8px; }
+      .panel { padding: 20px 16px; }
+      .url-td { max-width: 100px; }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>🔗 短链生成器</h1>
-    <input type="text" id="urlInput" placeholder="输入网址 (必须以 http:// 或 https:// 开头)" />
-    <input type="text" id="customInput" placeholder="自定义短码 (可选)" />
-    <button onclick="shortenUrl()">生成短链</button>
-    <div class="result" id="resultBox">
+<div class="container">
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('shorten', this)">🔗 生成短链</button>
+    <button class="tab-btn" onclick="switchTab('manage', this)">⚙️ 管理后台</button>
+  </div>
+
+  <!-- 生成短链 -->
+  <div class="panel active" id="panel-shorten">
+    <h1>短链生成器</h1>
+    <label>目标网址</label>
+    <input type="text" id="urlInput" placeholder="https://example.com" />
+    <label>自定义短码（可选）</label>
+    <input type="text" id="customInput" placeholder="留空则自动生成，仅限字母数字 - _" />
+    <button class="btn" onclick="shortenUrl()">生成短链</button>
+    <div class="result-box" id="resultBox">
       <p>✅ 生成成功：</p>
-      <div class="short-url">
-        <span id="shortUrl"></span>
+      <div class="short-url-row">
+        <span id="shortUrlText"></span>
         <button class="copy-btn" onclick="copyUrl()">复制</button>
       </div>
     </div>
   </div>
-  <script>
-    async function shortenUrl() {
-      const url = document.getElementById("urlInput").value.trim();
-      const customCode = document.getElementById("customInput").value.trim();
-      if (!url) return alert("请输入网址");
-      const res = await fetch("/shorten", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, customCode })
-      });
-      const data = await res.json();
-      if (data.error) {
-        alert(data.error);
-      } else {
-        document.getElementById("shortUrl").textContent = data.shortUrl;
-        document.getElementById("resultBox").style.display = "block";
-      }
-    }
-    function copyUrl() {
-      const text = document.getElementById("shortUrl").textContent;
-      navigator.clipboard.writeText(text).then(() => {
-        alert("已复制到剪贴板！");
-      });
-    }
-  </script>
-</body>
-</html>`,
-      { headers: { "Content-Type": "text/html;charset=UTF-8" } }
-    );
+
+  <!-- 管理后台 -->
+  <div class="panel" id="panel-manage">
+    <!-- 登录框 -->
+    <div id="loginBox" class="admin-login">
+      <h1>管理后台</h1>
+      <label>管理密钥（ADMIN_TOKEN）</label>
+      <input type="password" id="tokenInput" placeholder="输入你在 Worker 里设置的 token" />
+      <button class="btn" onclick="doLogin()">登录</button>
+    </div>
+
+    <!-- 列表 -->
+    <div id="listBox" style="display:none;">
+      <div class="toolbar">
+        <input type="text" id="searchInput" placeholder="搜索短码或网址…" oninput="filterTable()" />
+        <span class="select-info" id="selectInfo"></span>
+        <button class="del-selected-btn" id="batchDelBtn" disabled onclick="batchDelete()">删除所选</button>
+      </div>
+      <p class="total-tip" id="totalTip"></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:32px"><input type="checkbox" id="checkAll" onchange="toggleAll(this)" /></th>
+              <th>短码</th>
+              <th>目标网址</th>
+              <th style="width:130px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+      <button class="btn" style="margin-top:14px; background:#eee; color:#666;" onclick="doLogout()">退出登录</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── Tab 切换 ──────────────────────────────────────────────
+  function switchTab(name, el) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
   }
-};
+
+  // ── 生成短链 ─────────────────────────────────────────────
+  async function shortenUrl() {
+    const url = document.getElementById('urlInput').value.trim();
+    const customCode = document.getElementById('customInput').value.trim();
+    if (!url) return alert('请输入网址');
+    const res = await fetch('/shorten', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, customCode })
+    });
+    const data = await res.json();
+    if (data.error) {
+      alert(data.error);
+    } else {
+      document.getElementById('shortUrlText').textContent = data.shortUrl;
+      document.getElementById('resultBox').style.display = 'block';
+    }
+  }
+
+  function copyUrl() {
+    const text = document.getElementById('shortUrlText').textContent;
+    navigator.clipboard.writeText(text).then(() => alert('已复制到剪贴板！'));
+  }
+
+  // ── 管理后台 ─────────────────────────────────────────────
+  let token = sessionStorage.getItem('admin_token') || '';
+  let allRecords = [];
+  let selected = new Set();
+  let editingCode = null;
+
+  if (token) tryLoadList();
+
+  function doLogin() {
+    token = document.getElementById('tokenInput').value.trim();
+    if (!token) return alert('请输入管理密钥');
+    sessionStorage.setItem('admin_token', token);
+    tryLoadList();
+  }
+
+  function doLogout() {
+    token = '';
+    sessionStorage.removeItem('admin_token');
+    allRecords = [];
+    selected.clear();
+    document.getElementById('loginBox').style.display = '';
+    document.getElementById('listBox').style.display = 'none';
+  }
+
+  async function tryLoadList() {
+    const tbody = document.getElementById('tableBody');
+    tbody.innerHTML = '<tr><td colspan="4" class="loading-tip">加载中…</td></tr>';
+    document.getElementById('loginBox').style.display = 'none';
+    document.getElementById('listBox').style.display = '';
+
+    const res = await fetch('/admin/list', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    if (res.status === 401) {
+      alert('密钥错误，请重新登录');
+      doLogout();
+      return;
+    }
+    const data = await res.json();
+    allRecords = data.items || [];
+    selected.clear();
+    renderTable();
+  }
+
+  function filterTable() {
+    selected.clear();
+    renderTable();
+  }
+
+  function renderTable() {
+    const q = document.getElementById('searchInput').value.toLowerCase();
+    const filtered = allRecords.filter(r =>
+      r.code.toLowerCase().includes(q) || r.url.toLowerCase().includes(q)
+    );
+    document.getElementById('totalTip').textContent =
+      \`共 \${allRecords.length} 条记录\${q ? '，筛选后 ' + filtered.length + ' 条' : ''}\`;
+
+    const tbody = document.getElementById('tableBody');
+    if (!filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-tip">暂无记录</td></tr>';
+      updateBatchBtn();
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(r => {
+      if (r.code === editingCode) {
+        return \`<tr>
+          <td><input type="checkbox" class="row-check" value="\${r.code}" onchange="onCheck()" \${selected.has(r.code) ? 'checked' : ''} /></td>
+          <td class="code-td">\${r.code}</td>
+          <td colspan="2">
+            <input class="edit-input" id="edit-input-\${r.code}" value="\${escHtml(r.url)}" />
+            <div style="margin-top:6px;display:flex;gap:4px;">
+              <button class="save-btn" onclick="saveEdit('\${r.code}')">保存</button>
+              <button class="cancel-btn" onclick="cancelEdit()">取消</button>
+            </div>
+          </td>
+        </tr>\`;
+      }
+      return \`<tr>
+        <td><input type="checkbox" class="row-check" value="\${r.code}" onchange="onCheck()" \${selected.has(r.code) ? 'checked' : ''} /></td>
+        <td class="code-td">\${r.code}</td>
+        <td class="url-td" title="\${escHtml(r.url)}">\${escHtml(r.url)}</td>
+        <td>
+          <button class="row-edit-btn" onclick="startEdit('\${r.code}')">编辑</button>
+          <button class="row-del-btn" onclick="deleteOne('\${r.code}')">删除</button>
+        </td>
+      </tr>\`;
+    }).join('');
+
+    updateBatchBtn();
+    document.getElementById('checkAll').checked = false;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function onCheck() {
+    selected = new Set([...document.querySelectorAll('.row-check:checked')].map(c => c.value));
+    updateBatchBtn();
+  }
+
+  function toggleAll(cb) {
+    document.querySelectorAll('.row-check').forEach(c => { c.checked = cb.checked; });
+    onCheck();
+  }
+
+  function updateBatchBtn() {
+    const n = selected.size;
+    document.getElementById('batchDelBtn').disabled = n === 0;
+    document.getElementById('selectInfo').textContent = n ? \`已选 \${n} 条\` : '';
+  }
+
+  async function deleteOne(code) {
+    if (!confirm(\`确认删除短码 "\${code}"？\`)) return;
+    const res = await fetch('/admin/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ codes: [code] })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      allRecords = allRecords.filter(r => r.code !== code);
+      selected.delete(code);
+      renderTable();
+    } else {
+      alert('删除失败：' + (data.error || '未知错误'));
+    }
+  }
+
+  async function batchDelete() {
+    const codes = [...selected];
+    if (!confirm(\`确认删除选中的 \${codes.length} 条记录？\`)) return;
+    const res = await fetch('/admin/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ codes })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      allRecords = allRecords.filter(r => !selected.has(r.code));
+      selected.clear();
+      renderTable();
+    } else {
+      alert('删除失败：' + (data.error || '未知错误'));
+    }
+  }
+
+  function startEdit(code) {
+    editingCode = code;
+    renderTable();
+    document.getElementById('edit-input-' + code)?.focus();
+  }
+
+  function cancelEdit() {
+    editingCode = null;
+    renderTable();
+  }
+
+  async function saveEdit(code) {
+    const newUrl = document.getElementById('edit-input-' + code)?.value.trim();
+    if (!newUrl || !/^https?:\\/\\//.test(newUrl)) {
+      alert('请输入合法的网址');
+      return;
+    }
+    const res = await fetch('/admin/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ code, newUrl })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const rec = allRecords.find(r => r.code === code);
+      if (rec) rec.url = newUrl;
+      editingCode = null;
+      renderTable();
+    } else {
+      alert('保存失败：' + (data.error || '未知错误'));
+    }
+  }
+</script>
+</body>
+</html>`;
