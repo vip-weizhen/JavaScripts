@@ -6,7 +6,7 @@
 //   3. 修改下方 ADMIN_TOKEN，作为管理后台的访问密码
 // ============================================================
 
-const ADMIN_TOKEN = "wabjtam!"; 
+const ADMIN_TOKEN = ""; 
 
 export default {
   async fetch(request, env) {
