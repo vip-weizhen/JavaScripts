@@ -1,51 +1,109 @@
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request))
-})
+// ============================================
+// TVBox 完整代理 Worker - 支持所有相对路径资源
+// 自动将 ./xxx 请求转换为 GitHub 原始内容
+// ============================================
+
+const GITHUB_BASE = 'https://raw.githubusercontent.com/qist/tvbox/refs/heads/master/';
+
+// 文件类型对应的 Content-Type
+const CONTENT_TYPES = {
+  '.json': 'application/json; charset=utf-8',
+  '.jar': 'application/java-archive',
+  '.js': 'application/javascript; charset=utf-8',
+  '.py': 'text/x-python; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.m3u': 'application/vnd.apple.mpegurl',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.css': 'text/css; charset=utf-8',
+};
 
 async function handleRequest(request) {
-  try {
-    const targetUrl = 'https://iptvindex.com/db.json';
-    const headers = new Headers({
-      'Content-Type': 'application/json'
+  const url = new URL(request.url);
+  let path = url.pathname;
+  
+  // 1. 健康检查
+  if (path === '/health') {
+    return new Response(JSON.stringify({ status: 'ok', timestamp: Date.now() }), {
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });
-
-    const response = await fetch(targetUrl, {
-      headers: headers,
-      redirect: 'follow'
-    });
-
-    const results = await gatherResponse(response);
-
-    // 判断返回类型，如果是对象就转成 JSON 字符串
-    const body = typeof results === 'object'
-      ? JSON.stringify(results)
-      : results;
-
-    return new Response(body, {
-      status: response.status,
+  }
+  
+  // 2. CORS 预检
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
       headers: {
-        'Content-Type': response.headers.get('Content-Type') || 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': '*',
+      },
     });
-
+  }
+  
+  // 3. 只允许 GET
+  if (request.method !== 'GET') {
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+  
+  // 4. 处理根路径：返回主配置文件
+  let targetPath = path.slice(1);
+  if (!targetPath) {
+    targetPath = 'jsm.json';
+  }
+  
+  const targetUrl = GITHUB_BASE + targetPath;
+  
+  try {
+    // 请求 GitHub 原始内容
+    const response = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': 'Cloudflare-Worker-TvBox/1.0',
+        'Accept': '*/*',
+      },
+      cf: {
+        cacheTtl: path === '/jsm.json' ? 0 : 3600, // 主配置不缓存，其他缓存1小时
+        cacheEverything: true,
+      },
+    });
+    
+    // 处理 404
+    if (response.status === 404) {
+      return new Response(`文件不存在: ${targetPath}`, {
+        status: 404,
+        headers: { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' }
+      });
+    }
+    
+    if (!response.ok) {
+      return new Response(`代理错误: ${response.status}`, {
+        status: response.status,
+        headers: { 'Access-Control-Allow-Origin': '*' }
+      });
+    }
+    
+    // 获取正确的 Content-Type
+    const ext = path.substring(path.lastIndexOf('.')).toLowerCase();
+    const contentType = CONTENT_TYPES[ext] || response.headers.get('Content-Type') || 'application/octet-stream';
+    
+    // 返回响应
+    return new Response(response.body, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType,
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': path === '/jsm.json' ? 'no-cache, no-store' : 'public, max-age=3600',
+        'X-Proxy-Source': 'Cloudflare-Worker',
+      },
+    });
+    
   } catch (error) {
-    return new Response(JSON.stringify({
-      error: error.message
-    }), {
+    return new Response(`代理请求失败: ${error.message}`, {
       status: 500,
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Access-Control-Allow-Origin': '*' }
     });
   }
 }
 
-async function gatherResponse(response) {
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    return await response.json();
-  } else if (contentType.includes('text')) {
-    return await response.text();
-  } else {
-    return await response.arrayBuffer();
-  }
-}
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request));
+});
