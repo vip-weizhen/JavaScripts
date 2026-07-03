@@ -46,6 +46,239 @@ function newUrl(urlStr) {
     }
 }
 
+/**
+ * 首页 HTML —— 通用反向代理加速站点，不局限于 GitHub
+ */
+function homePage(host) {
+    const example1 = `https://${host}/https://github.com/user/repo/releases`
+    const example2 = `https://${host}/https://raw.githubusercontent.com/user/repo/main/README.md`
+    const example3 = `https://${host}/https://example.com/file.zip`
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>加速代理</title>
+<style>
+  :root {
+    --bg-1: #0b0e14;
+    --bg-2: #10141c;
+    --card: rgba(255,255,255,0.04);
+    --border: rgba(255,255,255,0.08);
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #6ea8fe;
+    --accent-2: #7ee787;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(720px 420px at 15% -10%, rgba(110,168,254,0.16), transparent 60%),
+      radial-gradient(640px 380px at 100% 0%, rgba(126,231,135,0.10), transparent 55%),
+      var(--bg-1);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 64px 20px 40px;
+    display: flex;
+    justify-content: center;
+  }
+  .wrap { width: 100%; max-width: 760px; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.72rem;
+    color: var(--accent-2);
+    background: rgba(126,231,135,0.1);
+    border: 1px solid rgba(126,231,135,0.25);
+    padding: 4px 10px;
+    border-radius: 999px;
+    margin-bottom: 18px;
+  }
+  .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-2); }
+  h1 {
+    font-size: 2rem;
+    margin: 0 0 10px;
+    letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #fff, #a9b4c9);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  p.sub { color: var(--muted); margin: 0 0 36px; font-size: 1rem; line-height: 1.6; max-width: 560px; }
+  .card {
+    background: var(--card);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px 26px;
+    margin-bottom: 20px;
+  }
+  .card h2 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 0 0 16px;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card h2 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 11px 13px;
+    margin-bottom: 10px;
+  }
+  .row:last-child { margin-bottom: 0; }
+  .row code {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--accent-2);
+    overflow-x: auto;
+    white-space: nowrap;
+    flex: 1;
+    scrollbar-width: none;
+  }
+  .row code::-webkit-scrollbar { display: none; }
+  .row button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 0.76rem;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all .15s ease;
+  }
+  .row button:hover { color: var(--text); border-color: var(--accent); background: rgba(110,168,254,0.08); }
+  .try-box { display: flex; gap: 10px; }
+  .try-box input {
+    flex: 1;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    color: var(--text);
+    font-size: 0.9rem;
+    font-family: var(--mono);
+  }
+  .try-box input::placeholder { color: #55607a; }
+  .try-box input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(110,168,254,0.15); }
+  .try-box button {
+    background: linear-gradient(135deg, var(--accent), #5b8def);
+    border: none;
+    color: #0b0e14;
+    font-weight: 700;
+    border-radius: 8px;
+    padding: 12px 22px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: opacity .15s ease;
+  }
+  .try-box button:hover { opacity: 0.88; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+  .feature {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: rgba(0,0,0,0.15);
+  }
+  .feature .t { font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; }
+  .feature .d { font-size: 0.76rem; color: var(--muted); line-height: 1.5; }
+  footer { text-align: center; color: #4d5568; font-size: 0.76rem; margin-top: 36px; }
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: 1fr; }
+    h1 { font-size: 1.6rem; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="badge">服务运行中</div>
+  <h1>通用加速代理</h1>
+  <p class="sub">在任意 URL 前拼接本站域名即可通过加速节点转发访问，支持 GitHub 仓库、Releases、Raw 文件，也支持其他网站的直链资源。</p>
+
+  <div class="card">
+    <h2><span class="dot"></span>使用方式</h2>
+    <div class="row">
+      <code>${example1}</code>
+      <button onclick="copyText(this, '${example1}')">复制</button>
+    </div>
+    <div class="row">
+      <code>${example2}</code>
+      <button onclick="copyText(this, '${example2}')">复制</button>
+    </div>
+    <div class="row">
+      <code>${example3}</code>
+      <button onclick="copyText(this, '${example3}')">复制</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>立即体验</h2>
+    <div class="try-box">
+      <input id="targetUrl" type="text" placeholder="粘贴任意链接，例如 https://example.com/file.zip" />
+      <button onclick="goProxy()">加速访问</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="dot"></span>特性</h2>
+    <div class="grid">
+      <div class="feature">
+        <div class="t">通用直链转发</div>
+        <div class="d">不限于 GitHub，任意公开可访问的 URL 均可代理转发。</div>
+      </div>
+      <div class="feature">
+        <div class="t">自动跟随跳转</div>
+        <div class="d">301/302 等重定向会自动改写并继续经过代理转发。</div>
+      </div>
+      <div class="feature">
+        <div class="t">跨域已放开</div>
+        <div class="d">统一附加 CORS 响应头，前端项目可直接调用。</div>
+      </div>
+      <div class="feature">
+        <div class="t">边缘节点加速</div>
+        <div class="d">基于全球边缘网络，就近转发请求，降低访问延迟。</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>Powered by vip.weizhen@gmail.com</footer>
+</div>
+
+<script>
+function copyText(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    const old = btn.textContent
+    btn.textContent = '已复制'
+    setTimeout(() => { btn.textContent = old }, 1200)
+  })
+}
+function goProxy() {
+  const input = document.getElementById('targetUrl')
+  let val = input.value.trim()
+  if (!val) return
+  if (!/^https?:\\/\\//i.test(val)) val = 'https://' + val
+  window.location.href = 'https://' + location.host + '/' + val
+}
+document.getElementById('targetUrl').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') goProxy()
+})
+</script>
+</body>
+</html>`
+}
+
 
 addEventListener('fetch', e => {
     const ret = fetchHandler(e)
@@ -96,7 +329,10 @@ async function fetchHandler(e) {
         return Response.redirect(newUrl, 302)
     } else {
         if (path === '' || path === '/') {
-            return new Response("success", {status: 200})
+            return new Response(homePage(urlObj.host), {
+                status: 200,
+                headers: {'content-type': 'text/html;charset=UTF-8'}
+            })
         }
         return httpHandler(req, urlObj, path)
     }
@@ -134,6 +370,9 @@ function httpHandler(req, reqUrlObj, pathname) {
     }
     // const urlObj = newUrl('http://online.dun.ornglad.com/download/QQ%E9%82%AE%E7%AE%B1_010273872.exe')
     const urlObj = newUrl(urlStr)
+    if (!urlObj) {
+        return makeRes('cfworker error:\nbad url: ' + urlStr, 400)
+    }
     /** @type {RequestInit} */
     const reqInit = {
         method: req.method,
@@ -200,8 +439,77 @@ async function proxy(cfReq, cfReqUrlObj, urlObj, reqInit, rawLen) {
     resHdrNew.delete('content-security-policy-report-only')
     resHdrNew.delete('clear-site-data')
     resHdrNew.delete('cross-origin-resource-policy')
+
+    // 修复页面里 include-fragment / turbo-frame / 相对或绝对链接懒加载资源
+    // （如 GitHub Release 的 Assets 列表）因路径丢失域名信息导致无法命中代理规则的问题
+    const contentType = resHdrNew.get('content-type') || ''
+    if (contentType.includes('text/html')) {
+        const originPrefix = urlObj.origin // 例如 https://github.com
+        const proxyOrigin = cfReqUrlObj.origin // 例如 https://cdn.weizhen.xyz
+        const rw = (attr) => new AttrRewriter(attr, originPrefix, proxyOrigin)
+        const rewriter = new HTMLRewriter()
+            // GitHub 自家的懒加载片段组件，Release Assets 列表就靠它
+            .on('include-fragment[src]', rw('src'))
+            .on('turbo-frame[src]', rw('src'))
+            .on('a[href]', rw('href'))
+            .on('form[action]', rw('action'))
+            .on('link[href]', rw('href'))
+            .on('img[src]', rw('src'))
+            .on('script[src]', rw('src'))
+
+        return rewriter.transform(new Response(res.body, {
+            status,
+            headers: resHdrNew,
+        }))
+    }
+
     return new Response(res.body, {
         status,
         headers: resHdrNew,
     })
+}
+
+// 需要走代理重写的域名（懒加载片段必须走代理才能被 JS fetch 读取到，
+// 否则要么路径丢失域名信息，要么跨域被浏览器拦截）
+const PROXY_HOST_PATTERN = /(^|\.)(github\.com|githubusercontent\.com|github\.io)$/i
+
+/**
+ * HTMLRewriter element handler：
+ * 1. 根相对路径（以单个 / 开头，非 //）—— 补上原始域名前缀，避免丢失 host 信息导致代理规则匹配失败
+ * 2. 指向 github 系域名的绝对 URL —— 改写成经由本代理转发的形式，避免浏览器直连触发跨域拦截
+ * 其余外部域名（静态资源、CDN 等）保持不变，直接走用户自己的网络。
+ */
+class AttrRewriter {
+    /**
+     * @param {string} attrName
+     * @param {string} originPrefix 当前页面真实的目标域名，如 https://github.com
+     * @param {string} proxyOrigin 当前代理站点的 origin，如 https://cdn.weizhen.xyz
+     */
+    constructor(attrName, originPrefix, proxyOrigin) {
+        this.attrName = attrName
+        this.originPrefix = originPrefix
+        this.proxyOrigin = proxyOrigin
+    }
+    element(el) {
+        const val = el.getAttribute(this.attrName)
+        if (!val) return
+
+        // 根相对路径：/xxx，但不是协议相对的 //xxx
+        if (val.startsWith('/') && !val.startsWith('//')) {
+            el.setAttribute(this.attrName, PREFIX + this.originPrefix + val)
+            return
+        }
+
+        // 绝对 URL，且命中需要代理的域名
+        if (/^https?:\/\//i.test(val)) {
+            try {
+                const host = new URL(val).hostname
+                if (PROXY_HOST_PATTERN.test(host)) {
+                    el.setAttribute(this.attrName, this.proxyOrigin + PREFIX + val)
+                }
+            } catch (e) {
+                // 忽略无法解析的 URL
+            }
+        }
+    }
 }
