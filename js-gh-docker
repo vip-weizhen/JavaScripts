@@ -1,4 +1,3 @@
-
 const ALLOWED_HOSTS = [
   'quay.io',
   'gcr.io',
@@ -25,6 +24,11 @@ const ALLOWED_PATHS = [
 ];
 
 // 用户配置区域结束 =================================
+
+// 需要在 HTML 里做链接改写的域名 —— GitHub 系页面的懒加载片段
+// （比如 Release 的 Assets 列表）依赖这些域名下的相对/绝对链接被正确代理，
+// 否则浏览器发出的后续请求会丢失域名信息或直连被拦截，导致内容永远加载不出来。
+const REWRITE_HOST_PATTERN = /(^|\.)(github\.com|githubusercontent\.com)$/i;
 
 // 闪电 SVG 图标（Base64 编码）
 const LIGHTNING_SVG = `
@@ -390,6 +394,44 @@ const HOMEPAGE_HTML = `
 </html>
 `;
 
+// HTMLRewriter element handler：修复 GitHub 页面里 include-fragment / turbo-frame /
+// 相对或绝对链接懒加载资源（如 Release 的 Assets 列表）因路径丢失域名信息、
+// 或浏览器绕过代理直连触发跨域拦截而导致的加载失败问题。
+class AttrRewriter {
+  /**
+   * @param {string} attrName
+   * @param {string} originPrefix 真实目标域名，如 https://github.com
+   * @param {string} proxyOrigin 当前代理站点的 origin
+   */
+  constructor(attrName, originPrefix, proxyOrigin) {
+    this.attrName = attrName;
+    this.originPrefix = originPrefix;
+    this.proxyOrigin = proxyOrigin;
+  }
+  element(el) {
+    const val = el.getAttribute(this.attrName);
+    if (!val) return;
+
+    // 根相对路径：/xxx，但不是协议相对的 //xxx
+    if (val.startsWith('/') && !val.startsWith('//')) {
+      el.setAttribute(this.attrName, '/' + this.originPrefix + val);
+      return;
+    }
+
+    // 绝对 URL，且命中需要代理的域名（github.com / githubusercontent.com 等）
+    if (/^https?:\/\//i.test(val)) {
+      try {
+        const host = new URL(val).hostname;
+        if (REWRITE_HOST_PATTERN.test(host)) {
+          el.setAttribute(this.attrName, this.proxyOrigin + '/' + val);
+        }
+      } catch (e) {
+        // 忽略无法解析的 URL
+      }
+    }
+  }
+}
+
 async function handleToken(realm, service, scope) {
   const tokenUrl = `${realm}?service=${service}&scope=${scope}`;
   console.log(`Fetching token from: ${tokenUrl}`);
@@ -702,6 +744,26 @@ async function handleRequest(request, redirectCount = 0) {
       // 删除可能存在的重定向头，确保所有请求都通过Worker处理
       newResponse.headers.delete('Location');
     }
+
+    // 非 Docker 的 HTML 页面（例如 GitHub 网页）需要做链接改写，
+    // 否则 include-fragment / turbo-frame 懒加载的相对或绝对链接会绕过代理，
+    // 导致 Release 页面的 Assets 列表等内容一直转圈加载不出来。
+    const contentType = newResponse.headers.get('content-type') || '';
+    if (!isDockerRequest && contentType.includes('text/html')) {
+      const originPrefix = `https://${targetDomain}`;
+      const proxyOrigin = url.origin;
+      const rw = (attr) => new AttrRewriter(attr, originPrefix, proxyOrigin);
+      const rewriter = new HTMLRewriter()
+        .on('include-fragment[src]', rw('src'))
+        .on('turbo-frame[src]', rw('src'))
+        .on('a[href]', rw('href'))
+        .on('form[action]', rw('action'))
+        .on('link[href]', rw('href'))
+        .on('img[src]', rw('src'))
+        .on('script[src]', rw('src'));
+      return rewriter.transform(newResponse);
+    }
+
     return newResponse;
   } catch (error) {
     console.log(`Fetch error: ${error.message}`);
