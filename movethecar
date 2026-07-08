@@ -215,16 +215,38 @@ function showToast(message, duration = 3000) {
               toast.classList.remove('show');
             }, duration);
           }
-           
+
+// 按钮改为禁用+loading，避免重复点击
+function setButtonLoading(btn, loading) {
+    if (loading) {
+        btn.classList.add('loading');
+        btn.disabled = true;
+    } else {
+        btn.classList.remove('loading');
+        btn.disabled = false;
+    }
+}
+
 function notifyOwner() {
-    // 获取本地存储的次数
-    let notifyCount = localStorage.getItem('notifyCount') ? parseInt(localStorage.getItem('notifyCount')) : 0;
     const maxCount = 3;
     const timeLimit = 60 * 1000; // 1分钟
- 
+
+    // 用时间戳判断是否已经过了限制窗口，而不是依赖 setTimeout
+    // （setTimeout 在页面关闭/刷新后不会执行，会导致次数卡住无法重置）
+    const now = Date.now();
+    const windowStart = parseInt(localStorage.getItem('notifyWindowStart') || '0');
+    let notifyCount = parseInt(localStorage.getItem('notifyCount') || '0');
+
+    if (now - windowStart > timeLimit) {
+        // 距上次窗口开始已超过1分钟，重新计数
+        notifyCount = 0;
+        localStorage.setItem('notifyWindowStart', now.toString());
+    }
+
     // 检查是否超过次数限制
     if (notifyCount >= maxCount) {
-        showToast("您已经连续通知过3次了，请稍后再试。");
+        const waitSeconds = Math.ceil((timeLimit - (now - windowStart)) / 1000);
+        showToast("您已经连续通知过" + maxCount + "次了，请" + (waitSeconds > 0 ? waitSeconds : 60) + "秒后再试。");
         return;
     }
     // 弹出提示框获取用户输入
@@ -234,41 +256,40 @@ function notifyOwner() {
     if (!userMessage) {
                 return;
             }
-    fetch("https://wxpusher.zjiecode.com/api/send/message", {
+
+    const btn = document.querySelector('.notify-btn');
+    setButtonLoading(btn, true);
+
+    // 注意：这里不再直接调用第三方通知服务，也不再暴露任何密钥。
+    // 而是调用本 Worker 自己的 /notify 接口，由服务端负责发邮件。
+    fetch("/notify", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-            appToken: "",
-            content: userMessage,  // 使用用户输入的内容
-            contentType: 1,
-            uids: [""]
-        })
+        body: JSON.stringify({ message: userMessage })
     })
     .then(response => response.json())
     .then(data => {
-        if (data.code === 1000) {
+        setButtonLoading(btn, false);
+        if (data.success) {
             showToast("通知已发送，车主很快就来！");
-            //alert("通知已发送！");
-            // 更新本地存储的次数
-            localStorage.setItem('notifyCount', notifyCount + 1);
-            // 设置时间限制
-            setTimeout(() => {
-                localStorage.setItem('notifyCount', 0);
-            }, timeLimit);
+            // 更新本地存储的次数（如果是新窗口第一次点击，记录窗口起始时间）
+            if (notifyCount === 0) {
+                localStorage.setItem('notifyWindowStart', now.toString());
+            }
+            localStorage.setItem('notifyCount', (notifyCount + 1).toString());
         } else {
             showToast("发送失败，请尝试电话联系");
-            //alert("通知发送失败，请稍后重试。");
         }
     })
     .catch(error => {
+        setButtonLoading(btn, false);
         console.error("Error sending notification:", error);
         showToast("网络错误，请尝试电话联系");
-        //alert("通知发送出错，请检查网络连接。");
     });
 }
   
 function callOwner() {
-    window.location.href = "tel:";
+    window.location.href = "tel:15152011074";
 }
 </script>
  
@@ -276,17 +297,64 @@ function callOwner() {
 
 
 </html>`
-async function handleRequest(request) {
+
+async function handleRequest(request, env) {
+  const url = new URL(request.url);
+
+  // 前端点击"通知车主挪车"时会 POST 到这里，由 Worker 服务端发邮件
+  if (url.pathname === "/notify" && request.method === "POST") {
+    return handleNotify(request, env);
+  }
+
   return new Response(html, {
     headers: {
       "content-type": "text/html;charset=UTF-8",
     },
-  })
+  });
 }
 
+async function handleNotify(request, env) {
+  try {
+    const { message } = await request.json();
 
+    if (!message || typeof message !== "string" || message.length > 500) {
+      return Response.json({ success: false, error: "invalid message" }, { status: 400 });
+    }
 
-addEventListener("fetch", event => {
-  return event.respondWith(handleRequest(event.request))
-})
+    // 用 Resend (https://resend.com) 发邮件
+    // 1. 注册 Resend 账号，拿到 API Key
+    // 2. 在 Cloudflare 项目里设置 Secret：
+    //    wrangler secret put RESEND_API_KEY
+    //    wrangler secret put NOTIFY_TO_EMAIL      // 车主接收通知的邮箱
+    //    wrangler secret put NOTIFY_FROM_EMAIL    // 发件地址，需在 Resend 里验证域名
+    const resendResp = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: env.NOTIFY_FROM_EMAIL,      // 例如 "挪车提醒 <notify@yourdomain.com>"
+        to: [env.NOTIFY_TO_EMAIL],        // 车主邮箱
+        subject: "挪车提醒",
+        text: message,
+      }),
+    });
 
+    const data = await resendResp.json();
+
+    if (resendResp.ok) {
+      return Response.json({ success: true });
+    } else {
+      console.error("Resend error:", data);
+      return Response.json({ success: false, error: data }, { status: 502 });
+    }
+  } catch (err) {
+    console.error("handleNotify error:", err);
+    return Response.json({ success: false, error: String(err) }, { status: 500 });
+  }
+}
+
+export default {
+  fetch: handleRequest,
+};
