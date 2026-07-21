@@ -1,0 +1,301 @@
+/**
+ * Cloudflare Worker：订阅分发 + 密码保护的手动更新页面
+ *
+ * 访问方式：
+ *   GET /            -> 订阅内容（base64），客户端直接用这个地址订阅，逻辑不变
+ *   GET /admin        -> 管理页面（需要密码），可以在网页里粘贴节点直接保存
+ *
+ * 部署前需要准备：
+ *   1. 一个 KV 命名空间，绑定变量名 SUB_KV
+ *   2. 一个 Secret：ADMIN_PASSWORD（你的管理密码）
+ */
+ 
+const DEFAULT_CONTENT = `
+`;
+
+const KV_KEY = 'sub_content';
+
+function toBase64Unicode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  bytes.forEach((b) => (binary += String.fromCharCode(b)));
+  return btoa(binary);
+}
+
+function cors(resp) {
+  resp.headers.set('Access-Control-Allow-Origin', '*');
+  return resp;
+}
+
+async function getContent(env) {
+  const stored = await env.SUB_KV.get(KV_KEY);
+  return stored !== null ? stored : DEFAULT_CONTENT;
+}
+
+function jsonResponse(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  });
+}
+
+function checkPassword(request, env) {
+  const auth = request.headers.get('X-Admin-Password') || '';
+  return auth === env.ADMIN_PASSWORD;
+}
+
+function adminPageHtml() {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>订阅节点管理</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1c1f24;
+    --muted: #6b7280;
+    --accent: #3b6fe0;
+    --accent-hover: #2f5cc4;
+    --danger: #d9433e;
+    --ok: #2f9e64;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px;
+  }
+  .wrap { width: 100%; max-width: 720px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  p.sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input[type="password"], textarea {
+    width: 100%;
+    background: #fafbfc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+  }
+  textarea {
+    min-height: 320px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    resize: vertical;
+    white-space: pre;
+  }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent-hover); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: #fff; border: 1px solid var(--border); color: var(--text); }
+  button.secondary:hover { background: #f2f3f5; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+  .status { font-size: 13px; margin-top: 10px; min-height: 18px; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--danger); }
+  .hidden { display: none !important; }
+  .count { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  code { background: #f2f3f5; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>订阅节点管理</h1>
+  <p class="sub">订阅地址本身不受影响，客户端照常直接访问根地址订阅。这里只是手动更新节点内容，保存后立即生效，无需重新部署。</p>
+
+  <div class="card" id="loginCard">
+    <label for="pwd">管理密码</label>
+    <input type="password" id="pwd" placeholder="输入密码" autocomplete="current-password" />
+    <div class="row">
+      <button id="loginBtn">进入</button>
+    </div>
+    <div class="status" id="loginStatus"></div>
+  </div>
+
+  <div class="card hidden" id="editCard">
+    <label for="content">节点列表（每行一个 vless:// 或 trojan:// 链接）</label>
+    <textarea id="content" spellcheck="false"></textarea>
+    <div class="count" id="lineCount"></div>
+    <div class="row">
+      <button id="saveBtn">保存并生效</button>
+      <button class="secondary" id="reloadBtn">重新加载当前内容</button>
+      <button class="secondary" id="logoutBtn">退出</button>
+    </div>
+    <div class="status" id="saveStatus"></div>
+  </div>
+</div>
+
+<script>
+let pwd = '';
+
+const loginCard = document.getElementById('loginCard');
+const editCard = document.getElementById('editCard');
+const pwdInput = document.getElementById('pwd');
+const loginBtn = document.getElementById('loginBtn');
+const loginStatus = document.getElementById('loginStatus');
+const contentArea = document.getElementById('content');
+const lineCount = document.getElementById('lineCount');
+const saveBtn = document.getElementById('saveBtn');
+const reloadBtn = document.getElementById('reloadBtn');
+const logoutBtn = document.getElementById('logoutBtn');
+const saveStatus = document.getElementById('saveStatus');
+
+function setStatus(el, msg, type) {
+  el.textContent = msg;
+  el.className = 'status' + (type ? ' ' + type : '');
+}
+
+function updateLineCount() {
+  const n = contentArea.value.split('\\n').filter(l => l.trim().length > 0).length;
+  lineCount.textContent = n + ' 个节点';
+}
+
+async function loadContent() {
+  const res = await fetch('/admin/api/get', {
+    method: 'POST',
+    headers: { 'X-Admin-Password': pwd, 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error('unauthorized');
+  const data = await res.json();
+  contentArea.value = data.content;
+  updateLineCount();
+}
+
+async function tryLogin() {
+  pwd = pwdInput.value;
+  if (!pwd) { setStatus(loginStatus, '请输入密码', 'err'); return; }
+  loginBtn.disabled = true;
+  setStatus(loginStatus, '验证中...', '');
+  try {
+    await loadContent();
+    loginCard.classList.add('hidden');
+    editCard.classList.remove('hidden');
+    setStatus(loginStatus, '', '');
+  } catch (e) {
+    setStatus(loginStatus, '密码错误', 'err');
+  } finally {
+    loginBtn.disabled = false;
+  }
+}
+
+loginBtn.addEventListener('click', tryLogin);
+pwdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLogin(); });
+
+contentArea.addEventListener('input', updateLineCount);
+
+saveBtn.addEventListener('click', async () => {
+  saveBtn.disabled = true;
+  setStatus(saveStatus, '保存中...', '');
+  try {
+    const res = await fetch('/admin/api/set', {
+      method: 'POST',
+      headers: { 'X-Admin-Password': pwd, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: contentArea.value }),
+    });
+    if (!res.ok) throw new Error('failed');
+    setStatus(saveStatus, '已保存，订阅地址已更新 ✓', 'ok');
+  } catch (e) {
+    setStatus(saveStatus, '保存失败，请重试', 'err');
+  } finally {
+    saveBtn.disabled = false;
+  }
+});
+
+reloadBtn.addEventListener('click', async () => {
+  try {
+    await loadContent();
+    setStatus(saveStatus, '已重新加载', 'ok');
+  } catch (e) {
+    setStatus(saveStatus, '加载失败', 'err');
+  }
+});
+
+logoutBtn.addEventListener('click', () => {
+  pwd = '';
+  pwdInput.value = '';
+  contentArea.value = '';
+  editCard.classList.add('hidden');
+  loginCard.classList.remove('hidden');
+  setStatus(loginStatus, '', '');
+  setStatus(saveStatus, '', '');
+});
+</script>
+</body>
+</html>`;
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // --- 管理页面 ---
+    if (path === '/admin' || path === '/admin/') {
+      return new Response(adminPageHtml(), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }
+
+    // --- 管理 API：读取当前内容（明文，非 base64，便于编辑）---
+    if (path === '/admin/api/get' && request.method === 'POST') {
+      if (!checkPassword(request, env)) {
+        return cors(jsonResponse({ error: 'unauthorized' }, 401));
+      }
+      const content = await getContent(env);
+      return cors(jsonResponse({ content }));
+    }
+
+    // --- 管理 API：保存新内容 ---
+    if (path === '/admin/api/set' && request.method === 'POST') {
+      if (!checkPassword(request, env)) {
+        return cors(jsonResponse({ error: 'unauthorized' }, 401));
+      }
+      let body;
+      try {
+        body = await request.json();
+      } catch (e) {
+        return cors(jsonResponse({ error: 'invalid body' }, 400));
+      }
+      const content = (body.content || '').trim() + '\n';
+      await env.SUB_KV.put(KV_KEY, content);
+      return cors(jsonResponse({ ok: true }));
+    }
+
+    // --- 默认：订阅内容，行为与原来完全一致，直接访问根地址即可订阅 ---
+    const content = await getContent(env);
+    return new Response(toBase64Unicode(content), {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+      },
+    });
+  },
+};
