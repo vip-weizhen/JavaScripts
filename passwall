@@ -1,19 +1,30 @@
 /**
- * Cloudflare Worker：订阅分发 + 密码保护的手动更新页面
+ * Cloudflare Worker：订阅分发（手动节点 + 自动优选IP节点） + 密码保护的管理页面
  *
  * 访问方式：
- *   GET /            -> 订阅内容（base64），客户端直接用这个地址订阅，逻辑不变
- *   GET /admin        -> 管理页面（需要密码），可以在网页里粘贴节点直接保存
+ *   GET /            -> 订阅内容（base64）= 手动节点 + 自动生成节点，客户端直接用这个地址订阅
+ *   GET /admin        -> 管理页面（需要密码），可编辑手动节点、自动节点的模板/来源/数量
  *
- * 部署前需要准备：
- *   1. 一个 KV 命名空间，绑定变量名 SUB_KV
- *   2. 一个 Secret：ADMIN_PASSWORD（你的管理密码）
+ * 需要的资源：
+ *   1. KV 命名空间，绑定变量名 SUB_KV
+ *   2. Secret：ADMIN_PASSWORD
  */
- 
-const DEFAULT_CONTENT = `
-`;
 
-const KV_KEY = 'sub_content';
+const KV_KEY = 'sub_config';
+
+// 首次部署、KV 还没有数据时的默认配置
+const DEFAULT_CONFIG = {
+  manual: ``,
+  auto: {
+    enabled: true,
+    sourceUrl: '',
+    template:
+      '',
+    count: 5,
+  },
+};
+
+/* ---------------- 工具函数 ---------------- */
 
 function toBase64Unicode(str) {
   const bytes = new TextEncoder().encode(str);
@@ -27,22 +38,112 @@ function cors(resp) {
   return resp;
 }
 
-async function getContent(env) {
-  const stored = await env.SUB_KV.get(KV_KEY);
-  return stored !== null ? stored : DEFAULT_CONTENT;
-}
-
 function jsonResponse(obj, status = 200) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-  });
+  return cors(
+    new Response(JSON.stringify(obj), {
+      status,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    })
+  );
 }
 
 function checkPassword(request, env) {
   const auth = request.headers.get('X-Admin-Password') || '';
   return auth === env.ADMIN_PASSWORD;
 }
+
+async function getConfig(env) {
+  const stored = await env.SUB_KV.get(KV_KEY, 'json');
+  if (!stored) return structuredClone(DEFAULT_CONFIG);
+  return {
+    manual: typeof stored.manual === 'string' ? stored.manual : DEFAULT_CONFIG.manual,
+    auto: {
+      enabled: stored.auto?.enabled !== undefined ? !!stored.auto.enabled : DEFAULT_CONFIG.auto.enabled,
+      sourceUrl: stored.auto?.sourceUrl || DEFAULT_CONFIG.auto.sourceUrl,
+      template: stored.auto?.template || DEFAULT_CONFIG.auto.template,
+      count: Number.isFinite(stored.auto?.count) ? stored.auto.count : DEFAULT_CONFIG.auto.count,
+    },
+  };
+}
+
+async function saveConfig(env, config) {
+  await env.SUB_KV.put(KV_KEY, JSON.stringify(config));
+}
+
+// 解析 "IP:PORT#备注" 格式的优选IP列表，返回 [{ip, port, note}]
+function parseIpList(text, limit) {
+  const results = [];
+  const lines = text.split('\n');
+  const lineRe = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})\s*#?(.*)$/;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const m = line.match(lineRe);
+    if (!m) continue;
+    results.push({ ip: m[1], port: m[2], note: m[3].trim() });
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
+// 把模板节点里的 host:port 换成给定 IP:port，remark 加上标记，其余参数不变
+function buildNodeFromTemplate(template, ip, port, idx, note) {
+  // 通用格式: scheme://userinfo@host:port?query#fragment
+  const m = template.match(/^([a-zA-Z0-9-]+):\/\/([^@]+)@([^:/?#]+):(\d+)([^#]*)(#.*)?$/);
+  if (!m) return null;
+  const [, scheme, userinfo, , , queryPart, fragmentPart] = m;
+
+  let remark = `Mr.wei Auto ${idx}`;
+  if (fragmentPart) {
+    try {
+      remark = decodeURIComponent(fragmentPart.slice(1));
+    } catch (e) {
+      remark = fragmentPart.slice(1);
+    }
+    remark = `${remark}-自动${idx}`;
+  }
+  const speedMatch = note.match(/([\d.]+\s*MB\/s)/i);
+  if (speedMatch) remark += ` ${speedMatch[1]}`;
+
+  return `${scheme}://${userinfo}@${ip}:${port}${queryPart}#${encodeURIComponent(remark)}`;
+}
+
+async function fetchAutoNodes(autoCfg) {
+  if (!autoCfg.enabled || !autoCfg.sourceUrl || !autoCfg.template) return [];
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(autoCfg.sourceUrl, {
+      signal: controller.signal,
+      cf: { cacheTtl: 300, cacheEverything: true }, // Cloudflare 边缘缓存 5 分钟，减轻抓取压力
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return [];
+    const text = await res.text();
+    const count = Math.max(1, Math.min(50, autoCfg.count || 5));
+    const ipList = parseIpList(text, count);
+    const nodes = [];
+    ipList.forEach((item, i) => {
+      const node = buildNodeFromTemplate(autoCfg.template, item.ip, item.port, i + 1, item.note);
+      if (node) nodes.push(node);
+    });
+    return nodes;
+  } catch (e) {
+    // 自动源抓取失败时静默忽略，不影响手动节点正常输出
+    return [];
+  }
+}
+
+async function buildSubscriptionContent(env) {
+  const config = await getConfig(env);
+  const manualLines = config.manual.trim();
+  const autoNodes = await fetchAutoNodes(config.auto);
+  const parts = [manualLines];
+  if (autoNodes.length > 0) parts.push(autoNodes.join('\n'));
+  return parts.filter(Boolean).join('\n') + '\n';
+}
+
+/* ---------------- 管理页面 ---------------- */
 
 function adminPageHtml() {
   return `<!DOCTYPE html>
@@ -73,8 +174,9 @@ function adminPageHtml() {
     justify-content: center;
     padding: 40px 16px;
   }
-  .wrap { width: 100%; max-width: 720px; }
+  .wrap { width: 100%; max-width: 760px; }
   h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
   p.sub { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
   .card {
     background: var(--panel);
@@ -84,8 +186,9 @@ function adminPageHtml() {
     margin-bottom: 16px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.05);
   }
-  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-  input[type="password"], textarea {
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; margin-top: 14px; }
+  label:first-child { margin-top: 0; }
+  input[type="password"], input[type="text"], input[type="number"], textarea {
     width: 100%;
     background: #fafbfc;
     border: 1px solid var(--border);
@@ -96,13 +199,18 @@ function adminPageHtml() {
     font-family: inherit;
   }
   textarea {
-    min-height: 320px;
+    min-height: 260px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 12.5px;
     line-height: 1.5;
     resize: vertical;
     white-space: pre;
   }
+  textarea.small { min-height: 70px; white-space: pre-wrap; word-break: break-all; }
+  .inline { display: flex; gap: 10px; align-items: center; }
+  .inline input[type="number"] { width: 100px; }
+  .switch-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .switch-row input { width: auto; }
   button {
     background: var(--accent);
     color: #fff;
@@ -117,19 +225,18 @@ function adminPageHtml() {
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.secondary { background: #fff; border: 1px solid var(--border); color: var(--text); }
   button.secondary:hover { background: #f2f3f5; }
-  .row { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
   .status { font-size: 13px; margin-top: 10px; min-height: 18px; }
   .status.ok { color: var(--ok); }
   .status.err { color: var(--danger); }
   .hidden { display: none !important; }
   .count { color: var(--muted); font-size: 12px; margin-top: 6px; }
-  code { background: #f2f3f5; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>订阅节点管理</h1>
-  <p class="sub">订阅地址本身不受影响，客户端照常直接访问根地址订阅。这里只是手动更新节点内容，保存后立即生效，无需重新部署。</p>
+  <p class="sub">订阅地址本身不受影响，客户端照常直接访问根地址订阅。保存后立即生效，无需重新部署。</p>
 
   <div class="card" id="loginCard">
     <label for="pwd">管理密码</label>
@@ -140,10 +247,29 @@ function adminPageHtml() {
     <div class="status" id="loginStatus"></div>
   </div>
 
-  <div class="card hidden" id="editCard">
-    <label for="content">节点列表（每行一个 vless:// 或 trojan:// 链接）</label>
-    <textarea id="content" spellcheck="false"></textarea>
-    <div class="count" id="lineCount"></div>
+  <div class="hidden" id="editArea">
+    <div class="card">
+      <h2>手动节点（每行一个 vless:// 或 trojan:// 链接）</h2>
+      <textarea id="manual" spellcheck="false"></textarea>
+      <div class="count" id="manualCount"></div>
+    </div>
+
+    <div class="card">
+      <h2>自动优选节点</h2>
+      <div class="switch-row">
+        <input type="checkbox" id="autoEnabled" />
+        <label for="autoEnabled" style="margin:0;">启用自动节点（从下方来源抓取优选 IP，替换进模板节点后追加到订阅）</label>
+      </div>
+      <label for="sourceUrl">优选 IP 来源地址（格式：IP:端口#备注，一行一个）</label>
+      <input type="text" id="sourceUrl" placeholder="https://..." />
+      <label for="template">模板节点（自动抓到的 IP:端口 会替换掉这个节点里的地址和端口，其余参数不变）</label>
+      <textarea class="small" id="template" spellcheck="false"></textarea>
+      <label for="count">取前几个优选 IP</label>
+      <div class="inline">
+        <input type="number" id="count" min="1" max="50" />
+      </div>
+    </div>
+
     <div class="row">
       <button id="saveBtn">保存并生效</button>
       <button class="secondary" id="reloadBtn">重新加载当前内容</button>
@@ -157,12 +283,16 @@ function adminPageHtml() {
 let pwd = '';
 
 const loginCard = document.getElementById('loginCard');
-const editCard = document.getElementById('editCard');
+const editArea = document.getElementById('editArea');
 const pwdInput = document.getElementById('pwd');
 const loginBtn = document.getElementById('loginBtn');
 const loginStatus = document.getElementById('loginStatus');
-const contentArea = document.getElementById('content');
-const lineCount = document.getElementById('lineCount');
+const manualArea = document.getElementById('manual');
+const manualCount = document.getElementById('manualCount');
+const autoEnabled = document.getElementById('autoEnabled');
+const sourceUrlInput = document.getElementById('sourceUrl');
+const templateArea = document.getElementById('template');
+const countInput = document.getElementById('count');
 const saveBtn = document.getElementById('saveBtn');
 const reloadBtn = document.getElementById('reloadBtn');
 const logoutBtn = document.getElementById('logoutBtn');
@@ -173,9 +303,9 @@ function setStatus(el, msg, type) {
   el.className = 'status' + (type ? ' ' + type : '');
 }
 
-function updateLineCount() {
-  const n = contentArea.value.split('\\n').filter(l => l.trim().length > 0).length;
-  lineCount.textContent = n + ' 个节点';
+function updateManualCount() {
+  const n = manualArea.value.split('\\n').filter(l => l.trim().length > 0).length;
+  manualCount.textContent = n + ' 个手动节点';
 }
 
 async function loadContent() {
@@ -185,8 +315,12 @@ async function loadContent() {
   });
   if (!res.ok) throw new Error('unauthorized');
   const data = await res.json();
-  contentArea.value = data.content;
-  updateLineCount();
+  manualArea.value = data.manual;
+  autoEnabled.checked = !!data.auto.enabled;
+  sourceUrlInput.value = data.auto.sourceUrl;
+  templateArea.value = data.auto.template;
+  countInput.value = data.auto.count;
+  updateManualCount();
 }
 
 async function tryLogin() {
@@ -197,7 +331,7 @@ async function tryLogin() {
   try {
     await loadContent();
     loginCard.classList.add('hidden');
-    editCard.classList.remove('hidden');
+    editArea.classList.remove('hidden');
     setStatus(loginStatus, '', '');
   } catch (e) {
     setStatus(loginStatus, '密码错误', 'err');
@@ -208,8 +342,7 @@ async function tryLogin() {
 
 loginBtn.addEventListener('click', tryLogin);
 pwdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLogin(); });
-
-contentArea.addEventListener('input', updateLineCount);
+manualArea.addEventListener('input', updateManualCount);
 
 saveBtn.addEventListener('click', async () => {
   saveBtn.disabled = true;
@@ -218,7 +351,15 @@ saveBtn.addEventListener('click', async () => {
     const res = await fetch('/admin/api/set', {
       method: 'POST',
       headers: { 'X-Admin-Password': pwd, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: contentArea.value }),
+      body: JSON.stringify({
+        manual: manualArea.value,
+        auto: {
+          enabled: autoEnabled.checked,
+          sourceUrl: sourceUrlInput.value.trim(),
+          template: templateArea.value.trim(),
+          count: parseInt(countInput.value, 10) || 5,
+        },
+      }),
     });
     if (!res.ok) throw new Error('failed');
     setStatus(saveStatus, '已保存，订阅地址已更新 ✓', 'ok');
@@ -241,8 +382,8 @@ reloadBtn.addEventListener('click', async () => {
 logoutBtn.addEventListener('click', () => {
   pwd = '';
   pwdInput.value = '';
-  contentArea.value = '';
-  editCard.classList.add('hidden');
+  manualArea.value = '';
+  editArea.classList.add('hidden');
   loginCard.classList.remove('hidden');
   setStatus(loginStatus, '', '');
   setStatus(saveStatus, '', '');
@@ -252,45 +393,48 @@ logoutBtn.addEventListener('click', () => {
 </html>`;
 }
 
+/* ---------------- 入口 ---------------- */
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // --- 管理页面 ---
     if (path === '/admin' || path === '/admin/') {
       return new Response(adminPageHtml(), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });
     }
 
-    // --- 管理 API：读取当前内容（明文，非 base64，便于编辑）---
     if (path === '/admin/api/get' && request.method === 'POST') {
-      if (!checkPassword(request, env)) {
-        return cors(jsonResponse({ error: 'unauthorized' }, 401));
-      }
-      const content = await getContent(env);
-      return cors(jsonResponse({ content }));
+      if (!checkPassword(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
+      const config = await getConfig(env);
+      return jsonResponse(config);
     }
 
-    // --- 管理 API：保存新内容 ---
     if (path === '/admin/api/set' && request.method === 'POST') {
-      if (!checkPassword(request, env)) {
-        return cors(jsonResponse({ error: 'unauthorized' }, 401));
-      }
+      if (!checkPassword(request, env)) return jsonResponse({ error: 'unauthorized' }, 401);
       let body;
       try {
         body = await request.json();
       } catch (e) {
-        return cors(jsonResponse({ error: 'invalid body' }, 400));
+        return jsonResponse({ error: 'invalid body' }, 400);
       }
-      const content = (body.content || '').trim() + '\n';
-      await env.SUB_KV.put(KV_KEY, content);
-      return cors(jsonResponse({ ok: true }));
+      const config = {
+        manual: (body.manual || '').trim() + '\n',
+        auto: {
+          enabled: !!body.auto?.enabled,
+          sourceUrl: body.auto?.sourceUrl || '',
+          template: body.auto?.template || '',
+          count: Number.isFinite(body.auto?.count) ? body.auto.count : 5,
+        },
+      };
+      await saveConfig(env, config);
+      return jsonResponse({ ok: true });
     }
 
-    // --- 默认：订阅内容，行为与原来完全一致，直接访问根地址即可订阅 ---
-    const content = await getContent(env);
+    // 默认：订阅内容 = 手动节点 + 自动生成节点
+    const content = await buildSubscriptionContent(env);
     return new Response(toBase64Unicode(content), {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
