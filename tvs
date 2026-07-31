@@ -1,0 +1,79 @@
+
+const TARGET_URL = 'https://raw.githubusercontent.com/noimank/tvbox/main/tvboxmuti.json';
+
+// 处理针对根路径的请求
+async function handleRequest(request) {
+  const url = new URL(request.url);
+
+  // 只允许 GET 请求，其他方法返回 405
+  if (request.method !== 'GET') {
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+
+  // 构造目标 URL，并保留查询参数（如果有）
+  const targetUrl = new URL(TARGET_URL);
+  // 将客户端请求的查询参数附加到目标 URL 上（如果有）
+  url.searchParams.forEach((value, key) => {
+    targetUrl.searchParams.append(key, value);
+  });
+
+  // 创建新的请求，复制原始请求头，但修改 Host 和 Referer 以规避限制
+  const modifiedHeaders = new Headers(request.headers);
+  modifiedHeaders.set('Host', targetUrl.hostname);
+  modifiedHeaders.set('Referer', 'https://github.com/');
+  // 移除可能导致问题的 Accept-Encoding，让 Worker 自动处理
+  modifiedHeaders.delete('Accept-Encoding');
+
+  const modifiedRequest = new Request(targetUrl.toString(), {
+    method: 'GET',
+    headers: modifiedHeaders,
+    // 不跟随重定向，由 Worker 手动处理更安全
+    redirect: 'manual',
+  });
+
+  try {
+    // 向目标服务器发起请求
+    const response = await fetch(modifiedRequest);
+
+    // 如果响应是重定向 (3xx)，可以选择跟随或返回错误
+    if (response.status >= 300 && response.status < 400) {
+      // 简单处理：直接返回重定向响应，或者您可以自行实现跟随逻辑
+      return new Response('Redirect detected, but not followed.', {
+        status: response.status,
+        headers: response.headers,
+      });
+    }
+
+    // 构建返回给客户端的响应
+    const responseHeaders = new Headers(response.headers);
+    // 添加跨域头 (CORS)，允许任何网站访问
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+    // 设置缓存，减少对源站的请求（缓存1小时，可调整）
+    responseHeaders.set('Cache-Control', 'public, max-age=3600');
+    // 移除可能导致问题的原服务器头信息（可选）
+    responseHeaders.delete('Content-Security-Policy');
+    responseHeaders.delete('X-Frame-Options');
+
+    // 返回内容
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+
+  } catch (error) {
+    // 请求失败时返回错误信息
+    return new Response(`Proxy error: ${error.message}`, {
+      status: 502,
+      headers: {
+        'Content-Type': 'text/plain',
+        'Access-Control-Allow-Origin': '*',
+      },
+    });
+  }
+}
+
+// 注册 Worker 的 fetch 事件监听器
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request));
+});
