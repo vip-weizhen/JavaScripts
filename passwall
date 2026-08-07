@@ -18,8 +18,7 @@ const DEFAULT_CONFIG = {
   auto: {
     enabled: true,
     sourceUrl: '',
-    template:
-      '',
+    template:'',
     count: 5,
   },
 };
@@ -70,11 +69,12 @@ async function saveConfig(env, config) {
   await env.SUB_KV.put(KV_KEY, JSON.stringify(config));
 }
 
-// 解析 "IP:PORT#备注" 格式的优选IP列表，返回 [{ip, port, note}]
+// 解析 "host:PORT#备注" 格式的优选列表，host 既可以是 IPv4 也可以是域名，返回 [{host, port, note}]
 function parseIpList(text, limit) {
   const results = [];
   const lines = text.split('\n');
-  const lineRe = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})\s*#?(.*)$/;
+  // host 部分允许字母、数字、点、短横线（覆盖 IPv4 和域名两种情况），必须跟着 :端口 和 #
+  const lineRe = /^([a-zA-Z0-9.-]+):(\d{1,5})\s*#\s*(.*)$/;
   for (const rawLine of lines) {
     const line = rawLine.trim();
     if (!line) continue;
