@@ -2,12 +2,12 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // === 配置 ===
+    // === 默认配置（前端未手动填写密钥参数时使用这一套）===
     const API_URL = "https://kp-open.keytop.cn/unite-api/api/wec/";
     const FIND_API_URL = "https://kp-open.keytop.cn/unite-api/api/find/"; // 预约车接口走这个前缀
-    const APP_ID = "";
-    const APP_SECRET = "";
-    const PARK_ID = "1208";
+    const DEFAULT_APP_ID = "10685";
+    const DEFAULT_APP_SECRET = "";
+    const DEFAULT_PARK_ID = "1208";
 
     // MD5工具
     async function md5(str) {
@@ -22,13 +22,13 @@ export default {
     // 生成签名
     // 注意：cardInfo/carLotList/plateNoInfo 等字段按科拓协议要求，必须以"已被JSON.stringify过的字符串"形式
     // 参与请求体与签名计算，而不是嵌套对象，否则签名会跟服务端计算不一致。
-    async function genSign(params) {
+    async function genSign(params, appSecret) {
       const filtered = Object.keys(params)
         .filter(k => params[k] !== null && params[k] !== "" && params[k] !== undefined && k !== "appId" && k !== "appSecret")
         .sort()
         .map(k => `${k}=${params[k]}`)
         .join("&");
-      return await md5(filtered + "&" + APP_SECRET);
+      return await md5(filtered + "&" + appSecret);
     }
 
     // 获取北京时间 yyyy-MM-dd HH:mm:ss
@@ -39,9 +39,19 @@ export default {
       return bj.toISOString().replace("T", " ").substring(0, 19);
     }
 
-    // 通用：调用科拓下行接口。base 默认走 /api/wec/，预约车系列走 /api/find/
-    async function callKeytop(endpoint, params, base = API_URL) {
-      params.key = await genSign(params);
+    // 从请求体里读取前端手动填写的接口密钥（appId/appSecret/parkId），留空则回退到默认值。
+    // 前端约定用 _appId / _appSecret / _parkId 这三个字段传递覆盖值，避免跟业务参数（如已有的 appId/parkId）冲突。
+    function resolveCredentials(body) {
+      return {
+        appId: (body && body._appId) ? String(body._appId) : DEFAULT_APP_ID,
+        appSecret: (body && body._appSecret) ? String(body._appSecret) : DEFAULT_APP_SECRET,
+        parkId: (body && body._parkId) ? String(body._parkId) : DEFAULT_PARK_ID
+      };
+    }
+
+    // 通用：调用科拓下行接口。base 默认走 /api/wec/，预约车/实时信息系列走各自前缀
+    async function callKeytop(endpoint, params, appSecret, base = API_URL) {
+      params.key = await genSign(params, appSecret);
       const res = await fetch(base + endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", version: "1.0.0" },
@@ -61,22 +71,23 @@ export default {
     // === API：查询欠费 ===
     if (url.pathname.endsWith("/api/query") && request.method === "POST") {
       try {
-        const { plateNo } = await request.json();
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "getParkingPaymentInfo",
           ts,
           reqId,
-          plateNo,
+          plateNo: body.plateNo,
           freeTime: "0",
           freeMoney: "0"
         };
 
-        const txt = await callKeytop("GetParkingPaymentInfo", params);
+        const txt = await callKeytop("GetParkingPaymentInfo", params, appSecret);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -86,14 +97,16 @@ export default {
     // === API：缴费 ===
     if (url.pathname.endsWith("/api/pay") && request.method === "POST") {
       try {
-        const { orderNo, payableAmount } = await request.json();
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
+        const { orderNo, payableAmount } = body;
         const ts = Date.now().toString();
         const reqId = ts;
         const payTime = getBeijingTime();
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "payParkingFee",
           ts,
           reqId,
@@ -108,7 +121,7 @@ export default {
           isNoSense: "0"
         };
 
-        const txt = await callKeytop("PayParkingFee", params);
+        const txt = await callKeytop("PayParkingFee", params, appSecret);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -119,12 +132,13 @@ export default {
     if (url.pathname.endsWith("/api/card/add") && request.method === "POST") {
       try {
         const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "addCarCardNo",
           ts,
           reqId,
@@ -135,7 +149,7 @@ export default {
           plateNoInfo: JSON.stringify(body.plateNoInfo || [])
         };
 
-        const txt = await callKeytop("AddCarCardNo", params);
+        const txt = await callKeytop("AddCarCardNo", params, appSecret);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -145,13 +159,15 @@ export default {
     // === API：固定车查询（2.2.2 GetCarCardInfo）===
     if (url.pathname.endsWith("/api/card/query") && request.method === "POST") {
       try {
-        const { plateNo, cardId, cardNo, state, carType, isFullPlateNo } = await request.json();
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
+        const { plateNo, cardId, cardNo, state, carType, isFullPlateNo } = body;
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "getCarCardInfo",
           ts,
           reqId,
@@ -163,7 +179,7 @@ export default {
           isFullPlateNo
         };
 
-        const txt = await callKeytop("GetCarCardInfo", params);
+        const txt = await callKeytop("GetCarCardInfo", params, appSecret);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -174,12 +190,13 @@ export default {
     if (url.pathname.endsWith("/api/card/modify") && request.method === "POST") {
       try {
         const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "modifyCarCardNo",
           ts,
           reqId,
@@ -190,7 +207,7 @@ export default {
           plateNoInfo: JSON.stringify(body.plateNoInfo || [])
         };
 
-        const txt = await callKeytop("ModifyCarCardNo", params);
+        const txt = await callKeytop("ModifyCarCardNo", params, appSecret);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -201,13 +218,14 @@ export default {
     if (url.pathname.endsWith("/api/card/recharge") && request.method === "POST") {
       try {
         const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
         const ts = Date.now().toString();
         const reqId = ts;
         const createTime = getBeijingTime();
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "payCarCardFee",
           ts,
           reqId,
@@ -231,7 +249,7 @@ export default {
           imageUrl: body.imageUrl
         };
 
-        const txt = await callKeytop("PayCarCardFee", params);
+        const txt = await callKeytop("PayCarCardFee", params, appSecret);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -242,12 +260,13 @@ export default {
     if (url.pathname.endsWith("/api/reserve/add") && request.method === "POST") {
       try {
         const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "reserveSpace",
           ts,
           reqId,
@@ -270,7 +289,7 @@ export default {
           bookingType: body.bookingType
         };
 
-        const txt = await callKeytop("ReserveSpace", params, FIND_API_URL);
+        const txt = await callKeytop("ReserveSpace", params, appSecret, FIND_API_URL);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -281,12 +300,13 @@ export default {
     if (url.pathname.endsWith("/api/reserve/modify") && request.method === "POST") {
       try {
         const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "reserveSpace_ChangeTime",
           ts,
           reqId,
@@ -297,7 +317,7 @@ export default {
           flag: body.flag
         };
 
-        const txt = await callKeytop("ReserveSpace_ChangeTime", params, FIND_API_URL);
+        const txt = await callKeytop("ReserveSpace_ChangeTime", params, appSecret, FIND_API_URL);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -307,20 +327,22 @@ export default {
     // === API：预约车-车位预订取消（2.4.3 CancelReserveSpace）===
     if (url.pathname.endsWith("/api/reserve/cancel") && request.method === "POST") {
       try {
-        const { orderNo } = await request.json();
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
+        const { orderNo } = body;
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "cancelReserveSpace",
           ts,
           reqId,
           orderNo
         };
 
-        const txt = await callKeytop("CancelReserveSpace", params, FIND_API_URL);
+        const txt = await callKeytop("CancelReserveSpace", params, appSecret, FIND_API_URL);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -330,13 +352,15 @@ export default {
     // === API：预约车-预订车位查询（2.4.4 GetReservableInfo）===
     if (url.pathname.endsWith("/api/reserve/available") && request.method === "POST") {
       try {
-        const { enterTime, leaveTime } = await request.json();
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
+        const { enterTime, leaveTime } = body;
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "getReservableInfo",
           ts,
           reqId,
@@ -344,7 +368,7 @@ export default {
           leaveTime
         };
 
-        const txt = await callKeytop("GetReservableInfo", params, FIND_API_URL);
+        const txt = await callKeytop("GetReservableInfo", params, appSecret, FIND_API_URL);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -355,12 +379,13 @@ export default {
     if (url.pathname.endsWith("/api/reserve/list") && request.method === "POST") {
       try {
         const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
         const ts = Date.now().toString();
         const reqId = ts;
 
         let params = {
-          appId: APP_ID,
-          parkId: PARK_ID,
+          appId,
+          parkId,
           serviceCode: "pageReserveSpace",
           ts,
           reqId,
@@ -373,7 +398,85 @@ export default {
           status: body.status
         };
 
-        const txt = await callKeytop("pageReserveSpace", params, FIND_API_URL);
+        const txt = await callKeytop("pageReserveSpace", params, appSecret, FIND_API_URL);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：实时信息-在场车辆查询（2.6.1 QueryCarInfo）===
+    if (url.pathname.endsWith("/api/realtime/carlist") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId,
+          parkId,
+          serviceCode: "queryCarInfo",
+          ts,
+          reqId,
+          plateNo: body.plateNo,
+          cardNo: body.cardNo,
+          billId: body.billId,
+          startTime: body.startTime,
+          endTime: body.endTime,
+          pageIndex: body.pageIndex ?? 1,
+          pageSize: body.pageSize ?? 20
+        };
+
+        const txt = await callKeytop("QueryCarInfo", params, appSecret);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：实时信息-剩余车位查询（2.6.2 GetFreeSpaceNum）===
+    if (url.pathname.endsWith("/api/realtime/freespace") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId,
+          parkId,
+          serviceCode: "getFreeSpaceNum",
+          ts,
+          reqId,
+          isFindCarSys: body.isFindCarSys ?? 0
+        };
+
+        const txt = await callKeytop("GetFreeSpaceNum", params, appSecret);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：实时信息-区域剩余车位查询（2.6.10 GetAreaFreeSpaceNum）===
+    if (url.pathname.endsWith("/api/realtime/areafreespace") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const { appId, appSecret, parkId } = resolveCredentials(body);
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId,
+          parkId,
+          serviceCode: "getAreaFreeSpaceNum",
+          ts,
+          reqId,
+          isFindCarSys: body.isFindCarSys ?? 0
+        };
+
+        const txt = await callKeytop("GetAreaFreeSpaceNum", params, appSecret);
         return jsonResponse(txt);
       } catch (err) {
         return errorResponse(err);
@@ -515,6 +618,11 @@ const PAGE_HTML = `<!DOCTYPE html>
   .field .hint{ color: var(--text-dim); font-weight:400; margin-left:6px; }
   .grid2{ display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   @media (max-width: 560px){ .grid2{ grid-template-columns: 1fr; } }
+  .grid3{ display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px){ .grid3{ grid-template-columns: 1fr; } }
+
+  .cred-panel{ margin-top:0; }
+  .cred-hint{ margin-top:10px; font-size:12px; color: var(--text-dim); line-height:1.6; }
 
   details.adv{
     margin: 14px 0 18px;
@@ -640,9 +748,20 @@ const PAGE_HTML = `<!DOCTYPE html>
 
 <div class="wrap">
 
+  <!-- 接口密钥（可覆盖默认配置） -->
+  <details class="adv cred-panel">
+    <summary>接口密钥（默认已配置，如需切换其他车场/应用可在此手动填写）</summary>
+    <div class="grid3">
+      <div class="field"><label>appId</label><input id="cfg_appId" placeholder="留空使用默认 10685"/></div>
+      <div class="field"><label>appSecret</label><input id="cfg_appSecret" placeholder="留空使用默认密钥"/></div>
+      <div class="field"><label>parkId</label><input id="cfg_parkId" placeholder="留空使用默认 1208"/></div>
+    </div>
+    <div class="cred-hint">三项均留空时，所有接口自动使用 Worker 里配置的默认 appId/appSecret/parkId；填写后本页面全部请求都会改用你填写的这一套，直到清空或刷新页面。</div>
+  </details>
+
   <!-- 顶部：临停查询缴费，常驻不折叠 -->
   <div class="quickpay">
-    <input type="text" id="plate" placeholder="车牌号，如 苏ANJKT1"/>
+    <input type="text" id="plate" placeholder="车牌号，如 苏C1M3Q7"/>
     <button class="action" onclick="query()">查询欠费</button>
     <button class="action secondary" id="payBtn" onclick="pay()" disabled>确认缴费</button>
     <div class="quickpay-result" id="result"></div>
@@ -652,6 +771,7 @@ const PAGE_HTML = `<!DOCTYPE html>
   <div class="group-nav">
     <button class="group-btn active" data-group="card" onclick="showGroup('card', this)">固定车管理</button>
     <button class="group-btn" data-group="reserve" onclick="showGroup('reserve', this)">预约车管理</button>
+    <button class="group-btn" data-group="realtime" onclick="showGroup('realtime', this)">实时信息查询</button>
   </div>
 
   <!-- 固定车 子导航 -->
@@ -669,6 +789,13 @@ const PAGE_HTML = `<!DOCTYPE html>
     <button class="sub-btn" onclick="showPanel('reserveModify', this)">修改有效期</button>
     <button class="sub-btn" onclick="showPanel('reserveCancel', this)">取消预约</button>
     <button class="sub-btn" onclick="showPanel('reserveList', this)">预约记录</button>
+  </div>
+
+  <!-- 实时信息查询 子导航 -->
+  <div class="sub-nav" id="nav-realtime" style="display:none;">
+    <button class="sub-btn active" onclick="showPanel('realtimeCarList', this)">在场车辆</button>
+    <button class="sub-btn" onclick="showPanel('realtimeFreeSpace', this)">剩余车位</button>
+    <button class="sub-btn" onclick="showPanel('realtimeAreaFreeSpace', this)">区域剩余车位</button>
   </div>
 
   <!-- ============ 固定车 面板 ============ -->
@@ -979,6 +1106,39 @@ const PAGE_HTML = `<!DOCTYPE html>
     <div class="result-panel" id="res_reserveList"></div>
   </div>
 
+  <!-- ============ 实时信息查询 面板 ============ -->
+  <div id="realtimeCarList" class="card">
+    <h3>在场车辆查询 <span class="hint">2.6.1</span></h3>
+    <div class="grid2">
+      <div class="field"><label>车牌号<span class="hint">支持模糊查询，非必填</span></label><input id="rt_plateNo"/></div>
+      <div class="field"><label>取票号/卡号<span class="hint">非必填</span></label><input id="rt_cardNo"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>入场开始时间<span class="hint">非必填</span></label><input type="datetime-local" id="rt_startTime"/></div>
+      <div class="field"><label>入场结束时间<span class="hint">非必填</span></label><input type="datetime-local" id="rt_endTime"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>页码</label><input id="rt_pageIndex" value="1"/></div>
+      <div class="field"><label>每页数量</label><input id="rt_pageSize" value="20"/></div>
+    </div>
+    <button class="action" onclick="realtimeCarList()">查询在场车辆</button>
+    <div class="result-panel" id="res_realtimeCarList"></div>
+  </div>
+
+  <div id="realtimeFreeSpace" class="card">
+    <h3>剩余车位查询 <span class="hint">2.6.2</span></h3>
+    <div class="field"><label>数据来源</label><input id="rf_isFindCarSys" value="0" title="0=收费系统 1=找车系统"/></div>
+    <button class="action" onclick="realtimeFreeSpace()">查询剩余车位</button>
+    <div class="result-panel" id="res_realtimeFreeSpace"></div>
+  </div>
+
+  <div id="realtimeAreaFreeSpace" class="card">
+    <h3>区域剩余车位查询 <span class="hint">2.6.10</span></h3>
+    <div class="field"><label>数据来源</label><input id="raf_isFindCarSys" value="0" title="0=收费系统 1=找车系统"/></div>
+    <button class="action" onclick="realtimeAreaFreeSpace()">查询区域剩余车位</button>
+    <div class="result-panel" id="res_realtimeAreaFreeSpace"></div>
+  </div>
+
 </div>
 
 <script>
@@ -1012,9 +1172,10 @@ const PAGE_HTML = `<!DOCTYPE html>
     btn.classList.add('active');
     document.getElementById('nav-card').style.display = group === 'card' ? 'flex' : 'none';
     document.getElementById('nav-reserve').style.display = group === 'reserve' ? 'flex' : 'none';
-    const firstPanel = group === 'card' ? 'cardQuery' : 'reserveAvailable';
+    document.getElementById('nav-realtime').style.display = group === 'realtime' ? 'flex' : 'none';
+    const firstPanelMap = { card: 'cardQuery', reserve: 'reserveAvailable', realtime: 'realtimeCarList' };
     const firstNav = document.getElementById('nav-' + group);
-    showPanel(firstPanel, firstNav.querySelector('.sub-btn'));
+    showPanel(firstPanelMap[group], firstNav.querySelector('.sub-btn'));
   }
 
   function showPanel(id, btn){
@@ -1095,11 +1256,24 @@ const PAGE_HTML = `<!DOCTYPE html>
     return badge(text, kindMap[status] || 'mut');
   }
 
+  // 读取页面顶部"接口密钥"区域里用户手动填写的覆盖值，自动附加到每一个请求体上。
+  // 对应输入框留空时不附加该字段，后端会自动回退到 Worker 里配置的默认密钥。
+  function withCredentials(body){
+    const appId = document.getElementById('cfg_appId').value.trim();
+    const appSecret = document.getElementById('cfg_appSecret').value.trim();
+    const parkId = document.getElementById('cfg_parkId').value.trim();
+    return Object.assign({}, body, {
+      _appId: appId || undefined,
+      _appSecret: appSecret || undefined,
+      _parkId: parkId || undefined
+    });
+  }
+
   async function postJson(path, body){
     const res = await fetch(path, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body)
+      body: JSON.stringify(withCredentials(body))
     });
     return await res.text();
   }
@@ -1489,6 +1663,81 @@ const PAGE_HTML = `<!DOCTYPE html>
         );
       } else {
         html += '<div class="empty-hint">暂无预约记录</div>';
+      }
+      return html;
+    });
+  }
+
+  // === 实时信息查询 ===
+  async function realtimeCarList(){
+    const body = {
+      plateNo: document.getElementById('rt_plateNo').value || undefined,
+      cardNo: document.getElementById('rt_cardNo').value || undefined,
+      startTime: dt('rt_startTime'),
+      endTime: dt('rt_endTime'),
+      pageIndex: Number(document.getElementById('rt_pageIndex').value),
+      pageSize: Number(document.getElementById('rt_pageSize').value)
+    };
+    renderApiResult('res_realtimeCarList', await postJson('./api/realtime/carlist', body), data => {
+      let html = kv([
+        ['总记录数', data.totalCount],
+        ['当前页', data.pageIndex],
+        ['每页数量', data.pageSize]
+      ]);
+      if(Array.isArray(data.plateList) && data.plateList.length){
+        html += sectionTitle('在场车辆');
+        html += listTable(
+          ['车牌号', '入场时间', '停车时长(分)', '进出地点', '套餐类型', '车颜色', '取票号/卡号'],
+          data.plateList.map(p => [
+            esc(p.plateNo),
+            esc(p.entryTime),
+            esc(p.parkingTime),
+            esc(p.entryPlace),
+            esc(p.carType),
+            esc(p.carColor),
+            esc(p.cardNo)
+          ])
+        );
+      } else {
+        html += '<div class="empty-hint">暂无在场车辆</div>';
+      }
+      return html;
+    });
+  }
+
+  async function realtimeFreeSpace(){
+    const body = { isFindCarSys: Number(document.getElementById('rf_isFindCarSys').value) };
+    renderApiResult('res_realtimeFreeSpace', await postJson('./api/realtime/freespace', body), data => {
+      return kv([
+        ['车场id', data.parkId],
+        ['车场名称', data.parkName],
+        ['总车位数', data.totalNum],
+        ['空闲车位数', data.freeSpaceNum]
+      ]);
+    });
+  }
+
+  async function realtimeAreaFreeSpace(){
+    const body = { isFindCarSys: Number(document.getElementById('raf_isFindCarSys').value) };
+    renderApiResult('res_realtimeAreaFreeSpace', await postJson('./api/realtime/areafreespace', body), data => {
+      let html = kv([
+        ['车场名称', data.parkName],
+        ['总车位数', data.totalNum],
+        ['空闲车位数', data.freeSpaceNum]
+      ]);
+      if(Array.isArray(data.areaInfo) && data.areaInfo.length){
+        html += sectionTitle('分区域剩余车位');
+        html += listTable(
+          ['区域编号', '区域名称', '区域总车位', '区域剩余车位'],
+          data.areaInfo.map(a => [
+            esc(a.areaCode),
+            esc(a.areaName),
+            esc(a.placeCount),
+            a.freeSpaceNum > 0 ? badge(a.freeSpaceNum + ' 个', 'ok') : badge('0 个', 'mut')
+          ])
+        );
+      } else {
+        html += '<div class="empty-hint">暂无区域数据</div>';
       }
       return html;
     });
