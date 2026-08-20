@@ -1,0 +1,1498 @@
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // === 配置 ===
+    const API_URL = "https://kp-open.keytop.cn/unite-api/api/wec/";
+    const FIND_API_URL = "https://kp-open.keytop.cn/unite-api/api/find/"; // 预约车接口走这个前缀
+    const APP_ID = "";
+    const APP_SECRET = "";
+    const PARK_ID = "1208";
+
+    // MD5工具
+    async function md5(str) {
+      const data = new TextEncoder().encode(str);
+      const digest = await crypto.subtle.digest("MD5", data);
+      return Array.from(new Uint8Array(digest))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("")
+        .toUpperCase();
+    }
+
+    // 生成签名
+    // 注意：cardInfo/carLotList/plateNoInfo 等字段按科拓协议要求，必须以"已被JSON.stringify过的字符串"形式
+    // 参与请求体与签名计算，而不是嵌套对象，否则签名会跟服务端计算不一致。
+    async function genSign(params) {
+      const filtered = Object.keys(params)
+        .filter(k => params[k] !== null && params[k] !== "" && params[k] !== undefined && k !== "appId" && k !== "appSecret")
+        .sort()
+        .map(k => `${k}=${params[k]}`)
+        .join("&");
+      return await md5(filtered + "&" + APP_SECRET);
+    }
+
+    // 获取北京时间 yyyy-MM-dd HH:mm:ss
+    function getBeijingTime() {
+      const now = new Date();
+      const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+      const bj = new Date(utc + 8 * 3600 * 1000);
+      return bj.toISOString().replace("T", " ").substring(0, 19);
+    }
+
+    // 通用：调用科拓下行接口。base 默认走 /api/wec/，预约车系列走 /api/find/
+    async function callKeytop(endpoint, params, base = API_URL) {
+      params.key = await genSign(params);
+      const res = await fetch(base + endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", version: "1.0.0" },
+        body: JSON.stringify(params)
+      });
+      return await res.text();
+    }
+
+    function jsonResponse(txt) {
+      return new Response(txt, { headers: { "Content-Type": "application/json;charset=utf-8" } });
+    }
+
+    function errorResponse(err) {
+      return jsonResponse(JSON.stringify({ resCode: "-1", resMsg: "Worker内部错误", err: String(err) }));
+    }
+
+    // === API：查询欠费 ===
+    if (url.pathname.endsWith("/api/query") && request.method === "POST") {
+      try {
+        const { plateNo } = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "getParkingPaymentInfo",
+          ts,
+          reqId,
+          plateNo,
+          freeTime: "0",
+          freeMoney: "0"
+        };
+
+        const txt = await callKeytop("GetParkingPaymentInfo", params);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：缴费 ===
+    if (url.pathname.endsWith("/api/pay") && request.method === "POST") {
+      try {
+        const { orderNo, payableAmount } = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+        const payTime = getBeijingTime();
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "payParkingFee",
+          ts,
+          reqId,
+          orderNo,
+          payableAmount: payableAmount.toString(),
+          payTime,
+          amount: payableAmount.toString(),
+          payType: "1010",
+          payMethod: "1004",
+          freeMoney: "0",
+          freeTime: "0",
+          isNoSense: "0"
+        };
+
+        const txt = await callKeytop("PayParkingFee", params);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：固定车新增（2.2.1 AddCarCardNo）===
+    if (url.pathname.endsWith("/api/card/add") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "addCarCardNo",
+          ts,
+          reqId,
+          userId: body.userId ?? "0",
+          userName: body.userName ?? "",
+          cardInfo: JSON.stringify(body.cardInfo || {}),
+          carLotList: JSON.stringify(body.carLotList || []),
+          plateNoInfo: JSON.stringify(body.plateNoInfo || [])
+        };
+
+        const txt = await callKeytop("AddCarCardNo", params);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：固定车查询（2.2.2 GetCarCardInfo）===
+    if (url.pathname.endsWith("/api/card/query") && request.method === "POST") {
+      try {
+        const { plateNo, cardId, cardNo, state, carType, isFullPlateNo } = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "getCarCardInfo",
+          ts,
+          reqId,
+          plateNo,
+          cardId,
+          cardNo,
+          state,
+          carType,
+          isFullPlateNo
+        };
+
+        const txt = await callKeytop("GetCarCardInfo", params);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：固定车修改（2.2.3 ModifyCarCardNo）===
+    if (url.pathname.endsWith("/api/card/modify") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "modifyCarCardNo",
+          ts,
+          reqId,
+          userId: body.userId ?? "0",
+          userName: body.userName ?? "",
+          cardInfo: JSON.stringify(body.cardInfo || {}),
+          carLotList: JSON.stringify(body.carLotList || []),
+          plateNoInfo: JSON.stringify(body.plateNoInfo || [])
+        };
+
+        const txt = await callKeytop("ModifyCarCardNo", params);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：固定车充值（2.2.6 PayCarCardFee）===
+    if (url.pathname.endsWith("/api/card/recharge") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+        const createTime = getBeijingTime();
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "payCarCardFee",
+          ts,
+          reqId,
+          userId: body.userId ?? "0",
+          userName: body.userName ?? "",
+          cardId: body.cardId,
+          orderNo: body.orderNo || ("R" + ts),
+          carType: body.carType,
+          payChannel: body.payChannel ?? 1,
+          chargeMethod: body.chargeMethod,
+          chargeNumber: body.chargeNumber,
+          amount: body.amount,
+          freeNumber: body.freeNumber ?? 0,
+          validFrom: body.validFrom,
+          validTo: body.validTo,
+          createTime,
+          remark: body.remark ?? "",
+          merchantNo: body.merchantNo,
+          ruleId: body.ruleId,
+          lotIds: body.lotIds,
+          imageUrl: body.imageUrl
+        };
+
+        const txt = await callKeytop("PayCarCardFee", params);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：预约车-用户车位预订（2.4.1 ReserveSpace）===
+    if (url.pathname.endsWith("/api/reserve/add") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "reserveSpace",
+          ts,
+          reqId,
+          plateNo: body.plateNo,
+          cardNo: body.cardNo,
+          type: body.type ?? "1", // 0:车位 1:区域
+          addrId: body.addrId,
+          enterTime: body.enterTime,
+          leaveTime: body.leaveTime,
+          userName: body.userName,
+          tel: body.tel,
+          failureTime: body.failureTime,
+          flag: body.flag ?? "1", // 0只允许进出一次 1允许多次进出场
+          flag2: body.flag2,
+          merchantName: body.merchantName,
+          remark: body.remark,
+          cardType: body.cardType ?? 100, // 默认100标准预约车，6x必填
+          bookingAmount: body.bookingAmount,
+          payMethod: body.payMethod,
+          bookingType: body.bookingType
+        };
+
+        const txt = await callKeytop("ReserveSpace", params, FIND_API_URL);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：预约车-修改预约车有效期（2.4.2 ReserveSpace_ChangeTime）===
+    if (url.pathname.endsWith("/api/reserve/modify") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "reserveSpace_ChangeTime",
+          ts,
+          reqId,
+          OrderNo: body.orderNo,
+          enterTime: body.enterTime,
+          leaveTime: body.leaveTime,
+          failureTime: body.failureTime,
+          flag: body.flag
+        };
+
+        const txt = await callKeytop("ReserveSpace_ChangeTime", params, FIND_API_URL);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：预约车-车位预订取消（2.4.3 CancelReserveSpace）===
+    if (url.pathname.endsWith("/api/reserve/cancel") && request.method === "POST") {
+      try {
+        const { orderNo } = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "cancelReserveSpace",
+          ts,
+          reqId,
+          orderNo
+        };
+
+        const txt = await callKeytop("CancelReserveSpace", params, FIND_API_URL);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：预约车-预订车位查询（2.4.4 GetReservableInfo）===
+    if (url.pathname.endsWith("/api/reserve/available") && request.method === "POST") {
+      try {
+        const { enterTime, leaveTime } = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "getReservableInfo",
+          ts,
+          reqId,
+          enterTime,
+          leaveTime
+        };
+
+        const txt = await callKeytop("GetReservableInfo", params, FIND_API_URL);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === API：预约车-查询预约记录列表（2.4.5 PageReserveSpace，仅6x）===
+    if (url.pathname.endsWith("/api/reserve/list") && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const ts = Date.now().toString();
+        const reqId = ts;
+
+        let params = {
+          appId: APP_ID,
+          parkId: PARK_ID,
+          serviceCode: "pageReserveSpace",
+          ts,
+          reqId,
+          fullCarNo: body.fullCarNo,
+          fullCardNo: body.fullCardNo,
+          startTime: body.startTime,
+          endTime: body.endTime,
+          pageIndex: body.pageIndex ?? 1,
+          pageSize: body.pageSize ?? 20,
+          status: body.status
+        };
+
+        const txt = await callKeytop("pageReserveSpace", params, FIND_API_URL);
+        return jsonResponse(txt);
+      } catch (err) {
+        return errorResponse(err);
+      }
+    }
+
+    // === 默认页面 ===
+    return new Response(PAGE_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+  }
+}
+
+const PAGE_HTML = `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>科拓车场控制台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #F6F7F9;
+    --panel: #FFFFFF;
+    --panel-2: #F1F2F5;
+    --border: #E2E4EA;
+    --text: #1B1E27;
+    --text-dim: #767C8C;
+    --accent: #E8A23D;   /* 道闸黄，压深一点保证白底可读 */
+    --accent-ink: #3A2A08; /* 黄色按钮上的文字色 */
+    --ok: #16A34A;
+    --err: #DC2626;
+    --radius: 10px;
+    font-family: 'Inter', -apple-system, sans-serif;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0;
+    background: var(--bg);
+    color: var(--text);
+    min-height:100vh;
+    padding-bottom: 60px;
+  }
+  header{
+    padding: 36px 24px 20px;
+    text-align:center;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    overflow:hidden;
+  }
+  header::before{
+    content:"";
+    position:absolute; left:0; right:0; top:0; height:4px;
+    background: repeating-linear-gradient(45deg, var(--accent) 0 14px, #1B1E27 14px 28px);
+    opacity:.8;
+  }
+  header h1{
+    font-size: 22px;
+    letter-spacing: 0.3px;
+    margin: 6px 0 4px;
+  }
+  header .sub{
+    color: var(--text-dim);
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .wrap{ max-width: 880px; margin: 0 auto; padding: 28px 20px 0; }
+
+  .quickpay{
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+  }
+  .quickpay input[type=text]{ flex:1; min-width: 180px; }
+  .quickpay-result{ width:100%; margin-top:14px; }
+
+  .group-nav{
+    display:flex; gap:8px; margin: 28px 0 14px; flex-wrap: wrap;
+  }
+  .group-btn{
+    background: var(--panel);
+    border:1px solid var(--border);
+    color: var(--text-dim);
+    padding: 9px 16px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight:600;
+    cursor:pointer;
+  }
+  .group-btn.active{
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: var(--accent);
+  }
+
+  .sub-nav{
+    display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap;
+  }
+  .sub-btn{
+    background: transparent;
+    border:1px solid var(--border);
+    color: var(--text-dim);
+    padding: 7px 14px;
+    border-radius: 7px;
+    font-size: 13px;
+    cursor:pointer;
+  }
+  .sub-btn.active{
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    background: rgba(232,162,61,0.16);
+  }
+
+  .card{
+    background: var(--panel);
+    border:1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px;
+    display:none;
+  }
+  .card.active{ display:block; }
+  .card h3{
+    margin:0 0 16px;
+    font-size:15px;
+    color: var(--accent);
+    font-weight:600;
+  }
+
+  .field{ margin-bottom: 12px; }
+  .field label{
+    display:block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+  .field .hint{ color: var(--text-dim); font-weight:400; margin-left:6px; }
+  .grid2{ display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 560px){ .grid2{ grid-template-columns: 1fr; } }
+
+  details.adv{
+    margin: 14px 0 18px;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 0 14px;
+  }
+  details.adv[open]{ padding-bottom: 12px; }
+  details.adv summary{
+    cursor: pointer;
+    padding: 10px 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim);
+    list-style: none;
+  }
+  details.adv summary::-webkit-details-marker{ display:none; }
+  details.adv summary::before{ content: '▸ '; color: var(--accent); }
+  details.adv[open] summary::before{ content: '▾ '; }
+  details.adv .sub-block-title{
+    font-size: 12px; font-weight:600; color: var(--accent-ink);
+    margin: 10px 0 8px;
+  }
+  details.adv .sub-block-title:first-child{ margin-top:0; }
+
+  input[type=text], input:not([type]), input[type=number], input[type=datetime-local]{
+    width:100%;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 12px;
+    border-radius: 7px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  input[type=datetime-local]{ cursor:pointer; }
+  input:focus{ outline:none; border-color: var(--accent); }
+
+  button.action{
+    background: var(--accent);
+    color: var(--accent-ink);
+    border:none;
+    padding: 10px 20px;
+    border-radius: 7px;
+    font-size: 14px;
+    font-weight:700;
+    cursor:pointer;
+    margin-top: 4px;
+  }
+  button.action:disabled{
+    background: var(--panel-2);
+    color: var(--text-dim);
+    cursor:not-allowed;
+  }
+  button.action.secondary{
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .result-panel{ margin-top: 18px; }
+  .result-panel:empty{ display:none; }
+
+  .result-panel .raw{
+    background: #1B1E27;
+    border: 1px solid #2E323E;
+    border-radius: 7px;
+    padding: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 360px;
+    overflow:auto;
+    color: #B9E8C4;
+  }
+  .result-panel .raw.err{ color: #FCA5A5; }
+
+  table.info{ width:100%; border-collapse: collapse; margin-top:12px; font-size:13px; }
+  table.info td{ padding:7px 10px; border-bottom:1px solid var(--border); }
+  table.info td:first-child{ color: var(--text-dim); width: 110px; }
+
+  table.info.list-table{ margin-top:6px; }
+  .table-scroll{ overflow-x:auto; margin-top:6px; }
+  .table-scroll table.info.list-table{ margin-top:0; min-width: 560px; }
+  table.info.list-table th{
+    text-align:left; padding:7px 10px; font-size:12px;
+    color: var(--text-dim); font-weight:600;
+    border-bottom:1px solid var(--border); background: var(--panel-2);
+  }
+  table.info.list-table td{ font-size:12.5px; }
+  table.info.list-table td:first-child{ width:auto; color: var(--text); }
+
+  .section-title{
+    font-size:12px; font-weight:600; color: var(--text-dim);
+    margin: 18px 0 4px; padding-top:12px; border-top:1px dashed var(--border);
+  }
+  .section-title:first-child{ margin-top:0; padding-top:0; border-top:none; }
+
+  .badge{
+    display:inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight:600;
+  }
+  .badge.ok{ background: rgba(22,163,74,0.12); color: var(--ok); }
+  .badge.warn{ background: rgba(232,162,61,0.16); color: #9A6B14; }
+  .badge.err{ background: rgba(220,38,38,0.1); color: var(--err); }
+  .badge.mut{ background: var(--panel-2); color: var(--text-dim); }
+
+  .empty-hint{ color: var(--text-dim); font-size: 13px; margin-top: 8px; }
+
+  .status-msg{ margin-top:12px; font-size: 13.5px; }
+  .status-msg.ok{ color: var(--ok); }
+  .status-msg.err{ color: var(--err); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>科拓车场控制台</h1>
+  <div class="sub">unite-api · parkId 1208</div>
+</header>
+
+<div class="wrap">
+
+  <!-- 顶部：临停查询缴费，常驻不折叠 -->
+  <div class="quickpay">
+    <input type="text" id="plate" placeholder="车牌号，如 苏ANJKT1"/>
+    <button class="action" onclick="query()">查询欠费</button>
+    <button class="action secondary" id="payBtn" onclick="pay()" disabled>确认缴费</button>
+    <div class="quickpay-result" id="result"></div>
+  </div>
+
+  <!-- 分组导航 -->
+  <div class="group-nav">
+    <button class="group-btn active" data-group="card" onclick="showGroup('card', this)">固定车管理</button>
+    <button class="group-btn" data-group="reserve" onclick="showGroup('reserve', this)">预约车管理</button>
+  </div>
+
+  <!-- 固定车 子导航 -->
+  <div class="sub-nav" id="nav-card">
+    <button class="sub-btn active" onclick="showPanel('cardQuery', this)">查询</button>
+    <button class="sub-btn" onclick="showPanel('cardAdd', this)">新增</button>
+    <button class="sub-btn" onclick="showPanel('cardModify', this)">修改</button>
+    <button class="sub-btn" onclick="showPanel('cardRecharge', this)">充值</button>
+  </div>
+
+  <!-- 预约车 子导航 -->
+  <div class="sub-nav" id="nav-reserve" style="display:none;">
+    <button class="sub-btn active" onclick="showPanel('reserveAvailable', this)">可预约车位</button>
+    <button class="sub-btn" onclick="showPanel('reserveAdd', this)">新增预约</button>
+    <button class="sub-btn" onclick="showPanel('reserveModify', this)">修改有效期</button>
+    <button class="sub-btn" onclick="showPanel('reserveCancel', this)">取消预约</button>
+    <button class="sub-btn" onclick="showPanel('reserveList', this)">预约记录</button>
+  </div>
+
+  <!-- ============ 固定车 面板 ============ -->
+  <div id="cardQuery" class="card active">
+    <h3>固定车查询</h3>
+    <div class="field"><label>车牌号 / 卡片id / 凭据号（三选一）</label>
+      <div class="grid2">
+        <input id="cq_plateNo" placeholder="车牌号"/>
+        <input id="cq_cardId" placeholder="卡片id"/>
+      </div>
+    </div>
+    <div class="field"><input id="cq_cardNo" placeholder="凭据号"/></div>
+    <button class="action" onclick="cardQuery()">查询</button>
+    <div class="result-panel" id="res_cardQuery"></div>
+  </div>
+
+  <div id="cardAdd" class="card">
+    <h3>固定车新增</h3>
+    <div class="grid2">
+      <div class="field"><label>操作人id</label><input id="ca_userId" value="0"/></div>
+      <div class="field"><label>操作人姓名</label><input id="ca_userName" value="admin"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>户主名（必填）</label><input id="ca_useName"/></div>
+      <div class="field"><label>手机号</label><input id="ca_tel"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>车牌号<span class="hint">和ETC号二选一</span></label><input id="ca_plateNo"/></div>
+      <div class="field"><label>ETC号/卡号<span class="hint">和车牌号二选一</span></label><input id="ca_etcNo"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>套餐类型（必填）<span class="hint">1.6.2枚举</span></label><input id="ca_carType" value="1"/></div>
+      <div class="field"><label>区域id（必填）<span class="hint">来源2.1.4，多个逗号分隔</span></label><input id="ca_areaId" value="0"/></div>
+    </div>
+    <div class="field"><label>车位数量（必填）</label><input id="ca_lotCount" value="1"/></div>
+
+    <details class="adv">
+      <summary>高级选项（卡片信息 / 车位信息 / 车牌信息 更多字段）</summary>
+
+      <div class="sub-block-title">卡片信息（cardInfo）</div>
+      <div class="grid2">
+        <div class="field"><label>卡片名称</label><input id="ca_cardName"/></div>
+        <div class="field"><label>邮箱</label><input id="ca_email"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>房间号</label><input id="ca_roomId"/></div>
+        <div class="field"><label>商户id</label><input id="ca_merchantId"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>联系地址</label><input id="ca_contact"/></div>
+        <div class="field"><label>辅助信息</label><input id="ca_assist"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>卡片首充日期<span class="hint">yyyy-MM-dd</span></label><input type="date" id="ca_effectiveTime"/></div>
+        <div class="field"><label>图片地址<span class="hint">多个逗号分隔</span></label><input id="ca_imageUrl"/></div>
+      </div>
+      <div class="field"><label>卡片备注</label><input id="ca_remak"/></div>
+
+      <div class="sub-block-title">车位信息（carLotList，单条）</div>
+      <div class="grid2">
+        <div class="field"><label>车位备注</label><input id="ca_lotName"/></div>
+        <div class="field"><label>排序<span class="hint">越小越靠前</span></label><input id="ca_sequence"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>充值规则id<span class="hint">来源2.2.5</span></label><input id="ca_ruleId"/></div>
+        <div class="field"><label>车位资源id<span class="hint">来源2.2.13，产权车位必传</span></label><input id="ca_spaceId"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车位首充日期<span class="hint">yyyy-MM-dd</span></label><input type="date" id="ca_lotEffectiveTime"/></div>
+        <div class="field"><label>是否产权车位</label><input id="ca_propertyLot" value="0" title="0=否 1=是"/></div>
+      </div>
+
+      <div class="sub-block-title">车牌信息（plateNoInfo，单条）</div>
+      <div class="grid2">
+        <div class="field"><label>车辆类型<span class="hint">1.6.8枚举，0小型1大型2摩托3超大</span></label><input id="ca_carStyle"/></div>
+        <div class="field"><label>车牌状态</label><input id="ca_plateState" value="1" title="1启用 2禁用"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车牌颜色</label><input id="ca_carNoColor"/></div>
+        <div class="field"><label>车身颜色</label><input id="ca_carColor"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车辆品牌</label><input id="ca_carBrand"/></div>
+        <div class="field"><label>车牌备注</label><input id="ca_plateRemark"/></div>
+      </div>
+    </details>
+
+    <button class="action" onclick="cardAdd()">新增固定车</button>
+    <div class="result-panel" id="res_cardAdd"></div>
+  </div>
+
+  <div id="cardModify" class="card">
+    <h3>固定车修改</h3>
+    <div class="field"><label>卡片id（必填）</label><input id="cm_cardId"/></div>
+    <div class="grid2">
+      <div class="field"><label>操作人id</label><input id="cm_userId" value="0"/></div>
+      <div class="field"><label>操作人姓名</label><input id="cm_userName" value="admin"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>户主名（必填）</label><input id="cm_useName"/></div>
+      <div class="field"><label>手机号</label><input id="cm_tel"/></div>
+    </div>
+
+    <details class="adv" open>
+      <summary>高级选项（卡片信息 / 车位信息 / 车牌信息 更多字段）</summary>
+
+      <div class="sub-block-title">卡片信息（cardInfo）</div>
+      <div class="grid2">
+        <div class="field"><label>卡片名称</label><input id="cm_cardName"/></div>
+        <div class="field"><label>邮箱</label><input id="cm_email"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>房间号</label><input id="cm_roomId"/></div>
+        <div class="field"><label>商户id</label><input id="cm_merchantId"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>联系地址</label><input id="cm_contact"/></div>
+        <div class="field"><label>辅助信息</label><input id="cm_assist"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>卡片首充日期<span class="hint">yyyy-MM-dd</span></label><input type="date" id="cm_effectiveTime"/></div>
+        <div class="field"><label>图片地址<span class="hint">多个逗号分隔</span></label><input id="cm_imageUrl"/></div>
+      </div>
+      <div class="field"><label>卡片备注</label><input id="cm_remak"/></div>
+
+      <div class="sub-block-title">车位信息（carLotList，单条，可选）
+        <span class="hint">id留空=新增车位；填id=更新该车位；只填id不填其他=删除该车位</span>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车位序号id</label><input id="cm_lotId" placeholder="留空=新增"/></div>
+        <div class="field"><label>车位备注</label><input id="cm_lotName"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>套餐类型<span class="hint">车位存在时必填</span></label><input id="cm_lotCarType"/></div>
+        <div class="field"><label>排序</label><input id="cm_sequence"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>区域名称<span class="hint">车位存在时必填</span></label><input id="cm_areaName"/></div>
+        <div class="field"><label>区域id<span class="hint">车位存在时必填，来源2.1.4，多个逗号分隔</span></label><input id="cm_areaId"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车位数量<span class="hint">车位存在时必填</span></label><input id="cm_lotCount"/></div>
+        <div class="field"><label>充值规则id</label><input id="cm_ruleId"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车位资源id<span class="hint">产权车位必传</span></label><input id="cm_spaceId"/></div>
+        <div class="field"><label>是否产权车位</label><input id="cm_propertyLot" value="0" title="0=否 1=是"/></div>
+      </div>
+      <div class="field"><label>车位首充日期<span class="hint">yyyy-MM-dd</span></label><input type="date" id="cm_lotEffectiveTime"/></div>
+
+      <div class="sub-block-title">车牌信息（plateNoInfo，单条，可选）
+        <span class="hint">id留空=新增车牌；填id=更新该车牌；只填id不填其他=删除该车牌</span>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车牌id</label><input id="cm_plateId" placeholder="留空=新增"/></div>
+        <div class="field"><label>车牌状态</label><input id="cm_plateState" value="1" title="1启用 2禁用"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车牌号<span class="hint">和ETC号二选一</span></label><input id="cm_plateNo"/></div>
+        <div class="field"><label>ETC号/卡号<span class="hint">和车牌号二选一</span></label><input id="cm_etcNo"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车辆类型<span class="hint">1.6.8枚举</span></label><input id="cm_carStyle"/></div>
+        <div class="field"><label>车牌颜色</label><input id="cm_carNoColor"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>车身颜色</label><input id="cm_carColor"/></div>
+        <div class="field"><label>车辆品牌</label><input id="cm_carBrand"/></div>
+      </div>
+      <div class="field"><label>车牌备注</label><input id="cm_plateRemark"/></div>
+    </details>
+
+    <button class="action" onclick="cardModify()">保存修改</button>
+    <div class="result-panel" id="res_cardModify"></div>
+  </div>
+
+  <div id="cardRecharge" class="card">
+    <h3>固定车充值</h3>
+    <div class="grid2">
+      <div class="field"><label>卡片id</label><input id="cr_cardId"/></div>
+      <div class="field"><label>套餐类型</label><input id="cr_carType" value="0"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>操作人id</label><input id="cr_userId" value="0"/></div>
+      <div class="field"><label>操作人姓名</label><input id="cr_userName" value="admin"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>充值方式<span class="hint">0钱(分)1月2天3小时4次5分钟(仅6x)</span></label><input id="cr_chargeMethod" value="1"/></div>
+      <div class="field"><label>充值数额</label><input id="cr_chargeNumber" value="1"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>支付金额（分）</label><input id="cr_amount" value="1000"/></div>
+      <div class="field"><label>赠送数量</label><input id="cr_freeNumber" value="0"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>有效期开始</label><input type="datetime-local" id="cr_validFrom"/></div>
+      <div class="field"><label>有效期结束</label><input type="datetime-local" id="cr_validTo"/></div>
+    </div>
+
+    <details class="adv">
+      <summary>高级选项</summary>
+      <div class="grid2">
+        <div class="field"><label>备注</label><input id="cr_remark"/></div>
+        <div class="field"><label>商户订单号</label><input id="cr_merchantNo"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>套餐充值规则id</label><input id="cr_ruleId"/></div>
+        <div class="field"><label>车位序号id<span class="hint">车位类别收费时必填，来源2.2.2，多个逗号分隔</span></label><input id="cr_lotIds"/></div>
+      </div>
+      <div class="field"><label>图片地址<span class="hint">多个逗号分隔</span></label><input id="cr_imageUrl"/></div>
+    </details>
+
+    <button class="action" onclick="cardRecharge()">确认充值</button>
+    <div class="result-panel" id="res_cardRecharge"></div>
+  </div>
+
+  <!-- ============ 预约车 面板 ============ -->
+  <div id="reserveAvailable" class="card">
+    <h3>可预约车位/区域查询</h3>
+    <div class="grid2">
+      <div class="field"><label>预约入场时间</label><input type="datetime-local" id="ra_enterTime"/></div>
+      <div class="field"><label>预约离场时间<span class="hint">留空默认4小时</span></label><input type="datetime-local" id="ra_leaveTime"/></div>
+    </div>
+    <button class="action" onclick="reserveAvailable()">查询可预约车位</button>
+    <div class="result-panel" id="res_reserveAvailable"></div>
+  </div>
+
+  <div id="reserveAdd" class="card">
+    <h3>新增车位预约</h3>
+    <div class="grid2">
+      <div class="field"><label>车牌号（含省份）</label><input id="rs_plateNo"/></div>
+      <div class="field"><label>取票号<span class="hint">6x可用，与车牌二选一</span></label><input id="rs_cardNo"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>类型</label><input id="rs_type" value="1" title="0:车位 1:区域"/></div>
+      <div class="field"><label>车位/区域ID<span class="hint">来源2.1.4，多个逗号分隔</span></label><input id="rs_addrId"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>预订入场时间</label><input type="datetime-local" id="rs_enterTime"/></div>
+      <div class="field"><label>预约离场时间</label><input type="datetime-local" id="rs_leaveTime"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>预订失效时间</label><input type="datetime-local" id="rs_failureTime"/></div>
+      <div class="field"><label>进出限制</label><input id="rs_flag" value="1" title="0只允许进出一次 1允许多次"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>用户名</label><input id="rs_userName"/></div>
+      <div class="field"><label>联系电话</label><input id="rs_tel"/></div>
+    </div>
+    <div class="field"><label>套餐类型<span class="hint">默认100标准预约车，6x必填</span></label><input id="rs_cardType" value="100"/></div>
+    <div class="field"><label>备注</label><input id="rs_remark"/></div>
+
+    <details class="adv">
+      <summary>高级选项（6x字段 / 场内预约等）</summary>
+      <div class="grid2">
+        <div class="field"><label>允许场内预约<span class="hint">1=允许，非必传</span></label><input id="rs_flag2" placeholder="1"/></div>
+        <div class="field"><label>商户名称</label><input id="rs_merchantName"/></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>预约金额（分）<span class="hint">6x字段，默认0</span></label><input id="rs_bookingAmount"/></div>
+        <div class="field"><label>支付方式<span class="hint">6x字段</span></label><input id="rs_payMethod"/></div>
+      </div>
+      <div class="field"><label>授权方式<span class="hint">6x字段</span></label><input id="rs_bookingType"/></div>
+    </details>
+
+    <button class="action" onclick="reserveAdd()">提交预约</button>
+    <div class="result-panel" id="res_reserveAdd"></div>
+  </div>
+
+  <div id="reserveModify" class="card">
+    <h3>修改预约车有效期</h3>
+    <div class="field"><label>预约订单号</label><input id="rm_orderNo"/></div>
+    <div class="grid2">
+      <div class="field"><label>预订入场时间</label><input type="datetime-local" id="rm_enterTime"/></div>
+      <div class="field"><label>预约离场时间</label><input type="datetime-local" id="rm_leaveTime"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>预订失效时间</label><input type="datetime-local" id="rm_failureTime"/></div>
+      <div class="field"><label>进出限制<span class="hint">非必填</span></label><input id="rm_flag" placeholder="0/1"/></div>
+    </div>
+    <button class="action" onclick="reserveModify()">保存修改</button>
+    <div class="result-panel" id="res_reserveModify"></div>
+  </div>
+
+  <div id="reserveCancel" class="card">
+    <h3>取消车位预约</h3>
+    <div class="field"><label>预约订单号</label><input id="rc_orderNo"/></div>
+    <button class="action" onclick="reserveCancel()">取消预约</button>
+    <div class="result-panel" id="res_reserveCancel"></div>
+  </div>
+
+  <div id="reserveList" class="card">
+    <h3>查询预约记录列表 <span class="hint">仅6x系统</span></h3>
+    <div class="grid2">
+      <div class="field"><label>车牌号<span class="hint">精准查询，非必填</span></label><input id="rl_fullCarNo"/></div>
+      <div class="field"><label>取票号/卡号<span class="hint">非必填</span></label><input id="rl_fullCardNo"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>起始时间</label><input type="datetime-local" id="rl_startTime"/></div>
+      <div class="field"><label>截止时间<span class="hint">跨度≤366天</span></label><input type="datetime-local" id="rl_endTime"/></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>页码</label><input id="rl_pageIndex" value="1"/></div>
+      <div class="field"><label>每页数量</label><input id="rl_pageSize" value="20"/></div>
+    </div>
+    <div class="field"><label>预约状态<span class="hint">非必填 0已取消 1待生效 2使用中 3已结束 4已失效</span></label><input id="rl_status"/></div>
+    <button class="action" onclick="reserveList()">查询</button>
+    <div class="result-panel" id="res_reserveList"></div>
+  </div>
+
+</div>
+
+<script>
+  function isJson(str){ try { JSON.parse(str); return true; } catch { return false; } }
+
+  // 把 <input type="datetime-local"> 的值 "2025-01-01T09:00" 转换成接口要求的 "2025-01-01 09:00:00"
+  function dt(id){
+    const v = document.getElementById(id).value;
+    if(!v) return undefined;
+    return v.replace('T', ' ') + ':00';
+  }
+
+  // 取输入框的值，空字符串一律转成 undefined，方便 JSON.stringify 时自动省略该字段
+  function val(id){
+    const v = document.getElementById(id).value;
+    return v === '' ? undefined : v;
+  }
+  function numOrUndef(id){
+    const v = document.getElementById(id).value;
+    return v === '' ? undefined : Number(v);
+  }
+  // 逗号分隔的字符串转成数组，空值返回 undefined
+  function csvArr(id){
+    const v = document.getElementById(id).value;
+    if(v === '') return undefined;
+    return v.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  function showGroup(group, btn){
+    document.querySelectorAll('.group-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('nav-card').style.display = group === 'card' ? 'flex' : 'none';
+    document.getElementById('nav-reserve').style.display = group === 'reserve' ? 'flex' : 'none';
+    const firstPanel = group === 'card' ? 'cardQuery' : 'reserveAvailable';
+    const firstNav = document.getElementById('nav-' + group);
+    showPanel(firstPanel, firstNav.querySelector('.sub-btn'));
+  }
+
+  function showPanel(id, btn){
+    document.querySelectorAll('.card').forEach(p => p.classList.remove('active'));
+    const parentNav = btn.parentElement;
+    parentNav.querySelectorAll('.sub-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    btn.classList.add('active');
+  }
+
+  // ===== 结果美化相关工具函数 =====
+  function esc(v){
+    if(v === undefined || v === null) return '';
+    return String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // 键值表格：rows 形如 [['标签', 值], ...]，值为空自动跳过
+  function kv(rows){
+    const filtered = rows.filter(r => r[1] !== undefined && r[1] !== null && r[1] !== '');
+    if(!filtered.length) return '';
+    return '<table class="info">' + filtered.map(r =>
+      '<tr><td>' + esc(r[0]) + '</td><td>' + r[1] + '</td></tr>'
+    ).join('') + '</table>';
+  }
+
+  // 列表表格：headers 是表头数组，rows 是二维数组（每行的值数组，已格式化好的HTML片段或文本）
+  function listTable(headers, rows){
+    if(!rows || !rows.length) return '<div class="empty-hint">暂无数据</div>';
+    const thead = '<tr>' + headers.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>';
+    const tbody = rows.map(r => '<tr>' + r.map(c => '<td>' + (c === undefined || c === null || c === '' ? '-' : c) + '</td>').join('') + '</tr>').join('');
+    return '<div class="table-scroll"><table class="info list-table"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>';
+  }
+
+  function sectionTitle(text){ return '<div class="section-title">' + esc(text) + '</div>'; }
+
+  function badge(text, kind){ return '<span class="badge ' + kind + '">' + esc(text) + '</span>'; }
+
+  // 尝试把接口返回的 data 字段（可能是JSON字符串，也可能已是对象）解析成对象
+  function parseData(data){
+    if(data === undefined || data === null || data === '') return {};
+    if(typeof data === 'object') return data;
+    try { return JSON.parse(data); } catch(e) { return {}; }
+  }
+
+  // 通用分发渲染：resCode !== '0' 时显示错误提示；成功时调用 buildHtml(data, obj) 生成结构化HTML；
+  // buildHtml 抛错或未提供时，回退成带缩进的原始JSON展示。
+  function renderApiResult(elId, txt, buildHtml){
+    const box = document.getElementById(elId);
+    if(!isJson(txt)){
+      box.innerHTML = '<div class="raw err">' + esc(txt) + '</div>';
+      return;
+    }
+    const obj = JSON.parse(txt);
+    if(obj.resCode !== '0'){
+      box.innerHTML = '<div class="status-msg err">' + esc(obj.resMsg || '请求失败') + '</div>';
+      return;
+    }
+    const data = parseData(obj.data);
+    try {
+      const html = buildHtml ? buildHtml(data, obj) : '';
+      box.innerHTML = html || '<div class="status-msg ok">✅ 操作成功</div>';
+    } catch(e){
+      box.innerHTML = '<div class="raw">' + esc(JSON.stringify(obj, null, 2)) + '</div>';
+    }
+  }
+
+  // 常用枚举文案
+  const CARD_STATE_MAP = {0:'未审核', 1:'审核通过', 2:'审核不通过（注销）'};
+  const CHECK_MAP = {0:'未审核', 1:'已审核'};
+  const RESERVE_TYPE_MAP = {0:'车位', 1:'区域'};
+  const RESERVE_STATUS_MAP = {0:'已取消', 1:'待生效', 2:'使用中', 3:'已结束', 4:'已失效'};
+  const PERMIT_TIMES_MAP = {0:'可多次进出', 1:'只能一次进出'};
+  const BOOKING_TYPE_MAP = {0:'车位预约', 1:'预约区域'};
+
+  function reserveStatusBadge(status){
+    const text = RESERVE_STATUS_MAP[status] ?? ('状态' + status);
+    const kindMap = {0:'mut', 1:'warn', 2:'ok', 3:'mut', 4:'err'};
+    return badge(text, kindMap[status] || 'mut');
+  }
+
+  async function postJson(path, body){
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    return await res.text();
+  }
+
+  // === 临停查询/缴费 ===
+  let lastOrderNo = null, lastPayable = 0;
+  const payBtn = document.getElementById('payBtn');
+
+  async function query(){
+    const plate = document.getElementById('plate').value;
+    const txt = await postJson('./api/query', {plateNo: plate});
+    const box = document.getElementById('result');
+
+    if(isJson(txt)){
+      const obj = JSON.parse(txt);
+      if(obj.resCode === '0' && obj.data){
+        const data = JSON.parse(obj.data);
+        lastOrderNo = data.orderNo;
+        lastPayable = data.payable;
+        payBtn.disabled = lastPayable <= 0;
+        box.innerHTML = '<table class="info">' +
+            '<tr><td>车场ID</td><td>' + data.parkId + '</td></tr>' +
+            '<tr><td>账单号</td><td>' + data.orderNo + '</td></tr>' +
+            '<tr><td>车牌号</td><td>' + data.plateNo + '</td></tr>' +
+            '<tr><td>卡号/票号</td><td>' + (data.cardNo || '-') + '</td></tr>' +
+            '<tr><td>车场名称</td><td>' + data.parkName + '</td></tr>' +
+            '<tr><td>入场时间</td><td>' + data.entryTime + '</td></tr>' +
+            '<tr><td>停车时长</td><td>' + data.elapsedTime + ' 分钟</td></tr>' +
+            '<tr><td>停车总金额</td><td>' + data.totalAmount + ' 分</td></tr>' +
+            '<tr><td>应缴金额</td><td>' + data.payable + ' 分</td></tr>' +
+          '</table>';
+      } else {
+        box.innerHTML = '<div class="status-msg err">未找到车辆信息</div>';
+        payBtn.disabled = true;
+      }
+    } else {
+      box.innerHTML = '<div class="status-msg err">接口返回异常：' + txt + '</div>';
+      payBtn.disabled = true;
+    }
+  }
+
+  async function pay(){
+    if(!lastOrderNo || lastPayable <= 0){ alert('没有可缴费用'); return; }
+    const txt = await postJson('./api/pay', {orderNo: lastOrderNo, payableAmount: lastPayable});
+    const box = document.getElementById('result');
+    if(isJson(txt)){
+      const obj = JSON.parse(txt);
+      if(obj.resCode === '0'){
+        box.innerHTML += '<div class="status-msg ok">✅ 缴费完成</div>';
+        payBtn.disabled = true;
+      } else {
+        box.innerHTML += '<div class="status-msg err">缴费失败：' + obj.resMsg + '</div>';
+      }
+    } else {
+      box.innerHTML += '<div class="status-msg err">缴费返回异常：' + txt + '</div>';
+    }
+  }
+
+  // === 固定车 ===
+  async function cardQuery(){
+    const body = {
+      plateNo: document.getElementById('cq_plateNo').value || undefined,
+      cardId: document.getElementById('cq_cardId').value || undefined,
+      cardNo: document.getElementById('cq_cardNo').value || undefined
+    };
+    renderApiResult('res_cardQuery', await postJson('./api/card/query', body), buildCardQueryHtml);
+  }
+
+  function buildCardQueryHtml(data){
+    if(!data || Object.keys(data).length === 0) return '<div class="status-msg err">未找到固定车信息</div>';
+    let html = '';
+    html += kv([
+      ['卡片id', data.cardId],
+      ['卡片名称', data.cardName],
+      ['户主名', data.useName],
+      ['手机号', data.tel],
+      ['邮箱', data.email],
+      ['房间号', data.roomId],
+      ['联系地址', data.contact],
+      ['商户id', data.merchantId],
+      ['车牌合集', data.fullCarNoStr],
+      ['车位数量', data.lotCount],
+      ['未过期车位', data.validCount],
+      ['状态', data.cardState !== undefined ? (CARD_STATE_MAP[data.cardState] ?? data.cardState) : undefined],
+      ['首充时间', data.effectiveTime],
+      ['最后更新', data.lastUpdateTime],
+      ['备注', data.remak]
+    ]);
+
+    if(Array.isArray(data.plateNoInfo) && data.plateNoInfo.length){
+      html += sectionTitle('车牌信息');
+      html += listTable(
+        ['车牌id', '车牌号', 'ETC号/卡号', '状态', '车辆类型', '车牌颜色', '车身颜色', '品牌', '备注'],
+        data.plateNoInfo.map(p => [
+          esc(p.id),
+          esc(p.plateNo),
+          esc(p.etcNo),
+          p.plateState === 2 ? badge('禁用', 'err') : badge('启用', 'ok'),
+          esc(p.carStyle),
+          esc(p.carNoColor),
+          esc(p.carColor),
+          esc(p.carBrand),
+          esc(p.remark)
+        ])
+      );
+    }
+
+    if(Array.isArray(data.carLotList) && data.carLotList.length){
+      html += sectionTitle('车位信息');
+      html += listTable(
+        ['车位id', '车位备注', '套餐', '区域', '有效期开始', '有效期结束', '车位数', '余额/次数', '产权车位', '充值规则id'],
+        data.carLotList.map(l => [
+          esc(l.id),
+          esc(l.lotName),
+          esc(l.carTypeName ?? l.carType),
+          esc(l.areaName),
+          esc(l.beginTime),
+          esc(l.endTime),
+          esc(l.lotCount),
+          esc(l.validValue),
+          l.propertyLot === 1 ? badge('是', 'warn') : badge('否', 'mut'),
+          esc(l.ruleId)
+        ])
+      );
+    }
+
+    return html;
+  }
+
+  async function cardAdd(){
+    const cardInfo = {
+      useName: val('ca_useName'),
+      tel: val('ca_tel'),
+      cardName: val('ca_cardName'),
+      email: val('ca_email'),
+      roomId: val('ca_roomId'),
+      merchantId: val('ca_merchantId'),
+      contact: val('ca_contact'),
+      assist: val('ca_assist'),
+      effectiveTime: val('ca_effectiveTime'),
+      imageUrl: val('ca_imageUrl'),
+      remak: val('ca_remak')
+    };
+    const carLot = {
+      areaId: csvArr('ca_areaId') || [],
+      carType: Number(document.getElementById('ca_carType').value),
+      lotCount: Number(document.getElementById('ca_lotCount').value),
+      lotName: val('ca_lotName'),
+      sequence: numOrUndef('ca_sequence'),
+      ruleId: numOrUndef('ca_ruleId'),
+      spaceId: csvArr('ca_spaceId'),
+      effectiveTime: val('ca_lotEffectiveTime'),
+      propertyLot: numOrUndef('ca_propertyLot')
+    };
+    const plate = {
+      plateNo: val('ca_plateNo'),
+      etcNo: val('ca_etcNo'),
+      carStyle: numOrUndef('ca_carStyle'),
+      carNoColor: val('ca_carNoColor'),
+      carColor: val('ca_carColor'),
+      carBrand: val('ca_carBrand'),
+      plateState: numOrUndef('ca_plateState'),
+      remark: val('ca_plateRemark')
+    };
+    const body = {
+      userId: document.getElementById('ca_userId').value,
+      userName: document.getElementById('ca_userName').value,
+      cardInfo,
+      carLotList: [carLot],
+      plateNoInfo: [plate]
+    };
+    renderApiResult('res_cardAdd', await postJson('./api/card/add', body), data => {
+      if(data.cardId === undefined) return '<div class="status-msg ok">✅ 提交成功</div>';
+      return kv([
+        ['新增卡片id', data.cardId],
+        ['审核状态', data.ischeck !== undefined ? (CHECK_MAP[data.ischeck] ?? data.ischeck) : undefined]
+      ]) || '<div class="status-msg ok">✅ 新增成功</div>';
+    });
+  }
+
+  async function cardModify(){
+    const cardInfo = {
+      cardId: document.getElementById('cm_cardId').value,
+      useName: val('cm_useName'),
+      tel: val('cm_tel'),
+      cardName: val('cm_cardName'),
+      email: val('cm_email'),
+      roomId: val('cm_roomId'),
+      merchantId: val('cm_merchantId'),
+      contact: val('cm_contact'),
+      assist: val('cm_assist'),
+      effectiveTime: val('cm_effectiveTime'),
+      imageUrl: val('cm_imageUrl'),
+      remak: val('cm_remak')
+    };
+
+    // 车位信息：只要填了其中任意一项才组装这条记录。
+    // id留空=新增；id+其他字段=更新；只填id=删除该车位。
+    const carLotList = [];
+    const lotId = val('cm_lotId'), lotName = val('cm_lotName'), lotCarType = val('cm_lotCarType'),
+          areaName = val('cm_areaName'), areaIdRaw = val('cm_areaId'), lotCount = val('cm_lotCount'),
+          ruleId = val('cm_ruleId'), spaceId = val('cm_spaceId'), propertyLot = val('cm_propertyLot'),
+          lotEffectiveTime = val('cm_lotEffectiveTime'), sequence = val('cm_sequence');
+    if(lotId || lotName || lotCarType || areaName || areaIdRaw || lotCount || ruleId || spaceId || lotEffectiveTime || sequence){
+      carLotList.push({
+        id: lotId,
+        lotName,
+        carType: lotCarType !== undefined ? Number(lotCarType) : undefined,
+        sequence: sequence !== undefined ? Number(sequence) : undefined,
+        areaName,
+        areaId: csvArr('cm_areaId'),
+        lotCount: lotCount !== undefined ? Number(lotCount) : undefined,
+        ruleId: ruleId !== undefined ? Number(ruleId) : undefined,
+        spaceId: csvArr('cm_spaceId'),
+        effectiveTime: lotEffectiveTime,
+        propertyLot: propertyLot !== undefined ? Number(propertyLot) : undefined
+      });
+    }
+
+    // 车牌信息：同理，id留空=新增；id+其他字段=更新；只填id=删除该车牌。
+    const plateNoInfo = [];
+    const plateId = val('cm_plateId'), plateNo = val('cm_plateNo'), etcNo = val('cm_etcNo'),
+          plateState = val('cm_plateState'), carStyle = val('cm_carStyle'), carNoColor = val('cm_carNoColor'),
+          carColor = val('cm_carColor'), carBrand = val('cm_carBrand'), plateRemark = val('cm_plateRemark');
+    if(plateId || plateNo || etcNo){
+      plateNoInfo.push({
+        id: plateId,
+        plateNo,
+        etcNo,
+        plateState: plateState !== undefined ? Number(plateState) : undefined,
+        carStyle: carStyle !== undefined ? Number(carStyle) : undefined,
+        carNoColor,
+        carColor,
+        carBrand,
+        remark: plateRemark
+      });
+    }
+
+    const body = {
+      userId: document.getElementById('cm_userId').value,
+      userName: document.getElementById('cm_userName').value,
+      cardInfo,
+      carLotList,
+      plateNoInfo
+    };
+    renderApiResult('res_cardModify', await postJson('./api/card/modify', body), () =>
+      '<div class="status-msg ok">✅ 修改成功</div>'
+    );
+  }
+
+  async function cardRecharge(){
+    const body = {
+      cardId: document.getElementById('cr_cardId').value,
+      carType: Number(document.getElementById('cr_carType').value),
+      userId: document.getElementById('cr_userId').value,
+      userName: document.getElementById('cr_userName').value,
+      chargeMethod: Number(document.getElementById('cr_chargeMethod').value),
+      chargeNumber: Number(document.getElementById('cr_chargeNumber').value),
+      amount: Number(document.getElementById('cr_amount').value),
+      freeNumber: Number(document.getElementById('cr_freeNumber').value),
+      validFrom: dt('cr_validFrom'),
+      validTo: dt('cr_validTo'),
+      payChannel: 1,
+      remark: document.getElementById('cr_remark').value || undefined,
+      merchantNo: document.getElementById('cr_merchantNo').value || undefined,
+      ruleId: document.getElementById('cr_ruleId').value || undefined,
+      lotIds: document.getElementById('cr_lotIds').value || undefined,
+      imageUrl: document.getElementById('cr_imageUrl').value || undefined
+    };
+    renderApiResult('res_cardRecharge', await postJson('./api/card/recharge', body), data => {
+      const table = kv([
+        ['充值订单号', data.orderNo],
+        ['审核状态', data.ischeck !== undefined ? (CHECK_MAP[data.ischeck] ?? data.ischeck) : undefined]
+      ]);
+      return (table ? table : '') + '<div class="status-msg ok">✅ 充值成功</div>';
+    });
+  }
+
+  // === 预约车 ===
+  async function reserveAvailable(){
+    const body = {
+      enterTime: dt('ra_enterTime'),
+      leaveTime: dt('ra_leaveTime')
+    };
+    renderApiResult('res_reserveAvailable', await postJson('./api/reserve/available', body), data => {
+      let html = kv([['总可预订数', data.totalNum]]);
+      if(Array.isArray(data.reserveList) && data.reserveList.length){
+        html += sectionTitle('可预约车位/区域');
+        html += listTable(
+          ['名称', '类型', '剩余车位', 'ID'],
+          data.reserveList.map(r => [
+            esc(r.addrName),
+            esc(RESERVE_TYPE_MAP[r.type] ?? r.type),
+            r.free > 0 ? badge(r.free + ' 个', 'ok') : badge('0 个', 'mut'),
+            esc(r.addrId)
+          ])
+        );
+      } else {
+        html += '<div class="empty-hint">暂无可预约车位/区域</div>';
+      }
+      return html;
+    });
+  }
+
+  async function reserveAdd(){
+    const body = {
+      plateNo: document.getElementById('rs_plateNo').value || undefined,
+      cardNo: document.getElementById('rs_cardNo').value || undefined,
+      type: document.getElementById('rs_type').value,
+      addrId: document.getElementById('rs_addrId').value,
+      enterTime: dt('rs_enterTime'),
+      leaveTime: dt('rs_leaveTime'),
+      failureTime: dt('rs_failureTime'),
+      flag: document.getElementById('rs_flag').value,
+      userName: document.getElementById('rs_userName').value || undefined,
+      tel: document.getElementById('rs_tel').value || undefined,
+      cardType: Number(document.getElementById('rs_cardType').value),
+      remark: document.getElementById('rs_remark').value || undefined,
+      flag2: val('rs_flag2'),
+      merchantName: val('rs_merchantName'),
+      bookingAmount: val('rs_bookingAmount'),
+      payMethod: val('rs_payMethod'),
+      bookingType: val('rs_bookingType')
+    };
+    renderApiResult('res_reserveAdd', await postJson('./api/reserve/add', body), data => {
+      const table = kv([
+        ['预约订单号', data.orderNo],
+        ['保留时间（最迟入场）', data.keepTime]
+      ]);
+      return (table || '<div class="status-msg ok">✅ 预约成功</div>');
+    });
+  }
+
+  async function reserveModify(){
+    const body = {
+      orderNo: document.getElementById('rm_orderNo').value,
+      enterTime: dt('rm_enterTime'),
+      leaveTime: dt('rm_leaveTime'),
+      failureTime: dt('rm_failureTime'),
+      flag: document.getElementById('rm_flag').value || undefined
+    };
+    renderApiResult('res_reserveModify', await postJson('./api/reserve/modify', body), () =>
+      '<div class="status-msg ok">✅ 有效期修改成功</div>'
+    );
+  }
+
+  async function reserveCancel(){
+    const body = { orderNo: document.getElementById('rc_orderNo').value };
+    renderApiResult('res_reserveCancel', await postJson('./api/reserve/cancel', body), () =>
+      '<div class="status-msg ok">✅ 预约已取消</div>'
+    );
+  }
+
+  async function reserveList(){
+    const body = {
+      fullCarNo: document.getElementById('rl_fullCarNo').value || undefined,
+      fullCardNo: document.getElementById('rl_fullCardNo').value || undefined,
+      startTime: dt('rl_startTime'),
+      endTime: dt('rl_endTime'),
+      pageIndex: Number(document.getElementById('rl_pageIndex').value),
+      pageSize: Number(document.getElementById('rl_pageSize').value),
+      status: document.getElementById('rl_status').value === '' ? undefined : Number(document.getElementById('rl_status').value)
+    };
+    renderApiResult('res_reserveList', await postJson('./api/reserve/list', body), data => {
+      let html = kv([
+        ['总记录数', data.totalCount],
+        ['当前页', data.pageIndex],
+        ['每页数量', data.pageSize]
+      ]);
+      if(Array.isArray(data.records) && data.records.length){
+        html += sectionTitle('预约记录');
+        html += listTable(
+          ['车牌号/凭据号', '预约进场', '预约出场', '失效时间', '状态', '进出限制', '预约类型', '车位/区域', '创建时间', '来源', '备注'],
+          data.records.map(r => [
+            esc(r.carNo || r.cardNo),
+            esc(r.beginTime),
+            esc(r.endTime),
+            esc(r.failureTime),
+            reserveStatusBadge(r.status),
+            esc(PERMIT_TIMES_MAP[r.permitTimes] ?? r.permitTimes),
+            esc(BOOKING_TYPE_MAP[r.bookingType] ?? r.bookingType),
+            esc(r.addrId || r.lotNo),
+            esc(r.createTime),
+            esc(r.source),
+            esc(r.remarks)
+          ])
+        );
+      } else {
+        html += '<div class="empty-hint">暂无预约记录</div>';
+      }
+      return html;
+    });
+  }
+</script>
+</body>
+</html>`;
