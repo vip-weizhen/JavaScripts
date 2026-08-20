@@ -761,7 +761,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 
   <!-- 顶部：临停查询缴费，常驻不折叠 -->
   <div class="quickpay">
-    <input type="text" id="plate" placeholder="车牌号，如 苏C1M3Q7"/>
+    <input type="text" id="plate" placeholder="车牌号，如 苏ANJTS1"/>
     <button class="action" onclick="query()">查询欠费</button>
     <button class="action secondary" id="payBtn" onclick="pay()" disabled>确认缴费</button>
     <div class="quickpay-result" id="result"></div>
