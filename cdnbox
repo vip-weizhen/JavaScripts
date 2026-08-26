@@ -1,0 +1,40 @@
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request))
+})
+
+async function handleRequest(request) {
+  const url = new URL(request.url)
+
+  // 定义你的域名列表
+  const domains = [
+    '',
+    '',
+    ''
+  ]
+
+  // 随机选择一个域名
+  const randomDomain = domains[Math.floor(Math.random() * domains.length)]
+
+  // 如果是 WebSocket 请求，直接代理
+  if (request.headers.get('Upgrade') === 'websocket') {
+    return await proxyWebSocket(request, randomDomain)
+  }
+
+  // 否则，处理普通 HTTP/HTTPS 请求
+  const path = url.pathname + url.search
+  const targetUrl = randomDomain + path
+  return Response.redirect(targetUrl, 302)
+}
+
+async function proxyWebSocket(request, targetDomain) {
+  // 修改请求的 Host 头为目标域名
+  const headers = new Headers(request.headers)
+  headers.set('Host', new URL(targetDomain).hostname)
+
+  // 转发 WebSocket 请求
+  return await fetch(targetDomain, {
+    headers: headers,
+    method: request.method,
+    body: request.body
+  })
+}
