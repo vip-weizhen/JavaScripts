@@ -30,20 +30,27 @@ export default {
     }
 
     // ── KV 记录读写辅助函数 ───────────────────────────────────
-    // 新格式：value 是 JSON 字符串 {"url": "...", "clicks": 0}
-    // 兼容旧格式：value 是纯网址字符串（自动当作 clicks: 0）
+    // 新格式：value 是 JSON 字符串 {"url": "...", "clicks": 0, "maxClicks": null}
+    // 兼容旧格式：value 是纯网址字符串（自动当作 clicks: 0, maxClicks: null）
+    // 兼容中间格式：没有 maxClicks 字段的旧 JSON 记录（自动补 null，即不限次数）
     async function getRecord(code) {
       const raw = await env.url.get(code);
       if (raw === null) return null;
       try {
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === "object" && typeof parsed.url === "string") {
-          return { url: parsed.url, clicks: Number(parsed.clicks) || 0 };
+          return {
+            url: parsed.url,
+            clicks: Number(parsed.clicks) || 0,
+            maxClicks: Number.isFinite(Number(parsed.maxClicks)) && Number(parsed.maxClicks) > 0
+              ? Number(parsed.maxClicks)
+              : null,
+          };
         }
       } catch (e) {
         // 不是 JSON，说明是旧数据（纯网址字符串），走下面的兼容分支
       }
-      return { url: raw, clicks: 0 };
+      return { url: raw, clicks: 0, maxClicks: null };
     }
 
     async function putRecord(code, record) {
@@ -53,13 +60,26 @@ export default {
     // ── POST /shorten：生成短链 ───────────────────────────────
     if (request.method === "POST" && pathname === "/shorten") {
       const data = await request.json();
-      let { url: longUrl, customCode } = data;
+      let { url: longUrl, customCode, maxClicks } = data;
 
       if (!longUrl || !/^https?:\/\//.test(longUrl)) {
         return new Response(JSON.stringify({ error: "请输入合法的网址（需以 http:// 或 https:// 开头）" }), {
           status: 400,
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
+      }
+
+      // 校验最大访问次数（可选）
+      let parsedMaxClicks = null;
+      if (maxClicks !== undefined && maxClicks !== null && maxClicks !== "") {
+        const n = Number(maxClicks);
+        if (!Number.isInteger(n) || n <= 0) {
+          return new Response(JSON.stringify({ error: "最大访问次数必须是大于 0 的整数" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          });
+        }
+        parsedMaxClicks = n;
       }
 
       let shortCode = customCode?.trim() || Math.random().toString(36).substring(2, 8);
@@ -80,10 +100,10 @@ export default {
         });
       }
 
-      await putRecord(shortCode, { url: longUrl, clicks: 0 });
+      await putRecord(shortCode, { url: longUrl, clicks: 0, maxClicks: parsedMaxClicks });
 
       return new Response(
-        JSON.stringify({ shortUrl: `${new URL(request.url).origin}/${shortCode}`, code: shortCode }),
+        JSON.stringify({ shortUrl: `${new URL(request.url).origin}/${shortCode}`, code: shortCode, maxClicks: parsedMaxClicks }),
         { headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
@@ -96,7 +116,7 @@ export default {
       const items = await Promise.all(
         list.keys.map(async (k) => {
           const rec = await getRecord(k.name);
-          return { code: k.name, url: rec.url, clicks: rec.clicks };
+          return { code: k.name, url: rec.url, clicks: rec.clicks, maxClicks: rec.maxClicks };
         })
       );
 
@@ -124,11 +144,11 @@ export default {
       });
     }
 
-    // ── POST /admin/update：修改目标网址（需鉴权）───────────
+    // ── POST /admin/update：修改目标网址 / 最大访问次数（需鉴权）───
     if (request.method === "POST" && pathname === "/admin/update") {
       if (!checkAuth()) return authFail();
 
-      const { code, newUrl } = await request.json();
+      const { code, newUrl, maxClicks } = await request.json();
       if (!code || !newUrl || !/^https?:\/\//.test(newUrl)) {
         return new Response(JSON.stringify({ error: "参数错误" }), {
           status: 400,
@@ -136,9 +156,21 @@ export default {
         });
       }
 
-      // 修改网址时保留原有的点击次数，不归零
+      let parsedMaxClicks = null;
+      if (maxClicks !== undefined && maxClicks !== null && maxClicks !== "") {
+        const n = Number(maxClicks);
+        if (!Number.isInteger(n) || n <= 0) {
+          return new Response(JSON.stringify({ error: "最大访问次数必须是大于 0 的整数" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json", ...corsHeaders },
+          });
+        }
+        parsedMaxClicks = n;
+      }
+
+      // 修改网址/限制次数时保留原有的点击次数，不归零
       const old = await getRecord(code);
-      await putRecord(code, { url: newUrl, clicks: old ? old.clicks : 0 });
+      await putRecord(code, { url: newUrl, clicks: old ? old.clicks : 0, maxClicks: parsedMaxClicks });
 
       return new Response(JSON.stringify({ ok: true }), {
         headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -157,7 +189,7 @@ export default {
           headers: { "Content-Type": "application/json", ...corsHeaders },
         });
       }
-      await putRecord(code, { url: rec.url, clicks: 0 });
+      await putRecord(code, { url: rec.url, clicks: 0, maxClicks: rec.maxClicks });
 
       return new Response(JSON.stringify({ ok: true }), {
         headers: { "Content-Type": "application/json", ...corsHeaders },
@@ -169,8 +201,14 @@ export default {
       const code = pathname.slice(1);
       const rec = await getRecord(code);
       if (rec) {
-        // 点击数 +1，用 waitUntil 异步写回，不阻塞跳转响应速度
-        ctx.waitUntil(putRecord(code, { url: rec.url, clicks: rec.clicks + 1 }));
+        const newClicks = rec.clicks + 1;
+        if (rec.maxClicks && newClicks >= rec.maxClicks) {
+          // 达到访问上限：本次仍然正常跳转，但随后异步删除该短链
+          ctx.waitUntil(env.url.delete(code));
+        } else {
+          // 点击数 +1，用 waitUntil 异步写回，不阻塞跳转响应速度
+          ctx.waitUntil(putRecord(code, { url: rec.url, clicks: newClicks, maxClicks: rec.maxClicks }));
+        }
         return Response.redirect(rec.url, 302);
       }
       return new Response("短链不存在", { status: 404 });
@@ -244,7 +282,8 @@ const HTML = `<!DOCTYPE html>
 
     /* ── 表单元素 ── */
     label { display: block; font-size: 13px; color: #666; margin-bottom: 5px; margin-top: 14px; }
-    input[type="text"], input[type="password"] {
+    .hint { font-size: 12px; color: #aaa; margin-top: 4px; }
+    input[type="text"], input[type="password"], input[type="number"] {
       width: 100%;
       padding: 10px 12px;
       border: 1px solid #ddd;
@@ -254,7 +293,7 @@ const HTML = `<!DOCTYPE html>
       outline: none;
       transition: border-color 0.2s;
     }
-    input[type="text"]:focus, input[type="password"]:focus {
+    input[type="text"]:focus, input[type="password"]:focus, input[type="number"]:focus {
       border-color: #4a90e2;
       box-shadow: 0 0 0 3px rgba(74,144,226,0.12);
     }
@@ -375,9 +414,10 @@ const HTML = `<!DOCTYPE html>
       white-space: nowrap;
       color: #666;
     }
-    .clicks-td { text-align: center; font-weight: 600; color: #555; }
+    .clicks-td { text-align: center; font-weight: 600; color: #555; white-space: nowrap; }
     .clicks-td.high { color: #ff3b30; }
     .clicks-td.mid { color: #e8902a; }
+    .clicks-td .max-part { font-weight: 400; color: #aaa; }
     .row-del-btn {
       padding: 4px 10px;
       background: none;
@@ -464,6 +504,9 @@ const HTML = `<!DOCTYPE html>
     <input type="text" id="urlInput" placeholder="https://example.com" />
     <label>自定义短码（可选）</label>
     <input type="text" id="customInput" placeholder="留空则自动生成，仅限字母数字 - _" />
+    <label>最大访问次数（可选）</label>
+    <input type="number" id="maxClicksInput" placeholder="留空表示不限次数" min="1" step="1" />
+    <p class="hint">达到该次数后，短链会在最后一次跳转完成后自动失效并删除</p>
     <button class="btn" onclick="shortenUrl()">生成短链</button>
     <div class="result-box" id="resultBox">
       <p>✅ 生成成功：</p>
@@ -471,6 +514,7 @@ const HTML = `<!DOCTYPE html>
         <span id="shortUrlText"></span>
         <button class="copy-btn" onclick="copyUrl()">复制</button>
       </div>
+      <p class="hint" id="maxClicksNote" style="margin-top:8px;"></p>
     </div>
   </div>
 
@@ -500,7 +544,7 @@ const HTML = `<!DOCTYPE html>
               <th style="width:32px"><input type="checkbox" id="checkAll" onchange="toggleAll(this)" /></th>
               <th>短码</th>
               <th>目标网址</th>
-              <th style="width:70px">访问次数</th>
+              <th style="width:80px">访问次数</th>
               <th style="width:150px">操作</th>
             </tr>
           </thead>
@@ -525,17 +569,24 @@ const HTML = `<!DOCTYPE html>
   async function shortenUrl() {
     const url = document.getElementById('urlInput').value.trim();
     const customCode = document.getElementById('customInput').value.trim();
+    const maxClicksRaw = document.getElementById('maxClicksInput').value.trim();
     if (!url) return alert('请输入网址');
+    if (maxClicksRaw && (!/^\\d+$/.test(maxClicksRaw) || Number(maxClicksRaw) <= 0)) {
+      return alert('最大访问次数必须是大于 0 的整数');
+    }
     const res = await fetch('/shorten', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, customCode })
+      body: JSON.stringify({ url, customCode, maxClicks: maxClicksRaw ? Number(maxClicksRaw) : null })
     });
     const data = await res.json();
     if (data.error) {
       alert(data.error);
     } else {
       document.getElementById('shortUrlText').textContent = data.shortUrl;
+      document.getElementById('maxClicksNote').textContent = data.maxClicks
+        ? \`⏳ 最多可访问 \${data.maxClicks} 次，超过后自动失效\`
+        : '';
       document.getElementById('resultBox').style.display = 'block';
     }
   }
@@ -627,12 +678,17 @@ const HTML = `<!DOCTYPE html>
 
     tbody.innerHTML = filtered.map(r => {
       const clicks = r.clicks || 0;
+      const maxClicks = r.maxClicks || null;
+      const clicksDisplay = maxClicks
+        ? \`\${clicks}<span class="max-part"> / \${maxClicks}</span>\`
+        : \`\${clicks}\`;
       if (r.code === editingCode) {
         return \`<tr>
           <td><input type="checkbox" class="row-check" value="\${r.code}" onchange="onCheck()" \${selected.has(r.code) ? 'checked' : ''} /></td>
           <td class="code-td">\${r.code}</td>
           <td colspan="3">
-            <input class="edit-input" id="edit-input-\${r.code}" value="\${escHtml(r.url)}" />
+            <input class="edit-input" id="edit-input-\${r.code}" value="\${escHtml(r.url)}" placeholder="目标网址" />
+            <input class="edit-input" id="edit-max-\${r.code}" value="\${maxClicks || ''}" placeholder="最大访问次数，留空不限" style="margin-top:6px;" />
             <div style="margin-top:6px;display:flex;gap:4px;">
               <button class="save-btn" onclick="saveEdit('\${r.code}')">保存</button>
               <button class="cancel-btn" onclick="cancelEdit()">取消</button>
@@ -644,7 +700,7 @@ const HTML = `<!DOCTYPE html>
         <td><input type="checkbox" class="row-check" value="\${r.code}" onchange="onCheck()" \${selected.has(r.code) ? 'checked' : ''} /></td>
         <td class="code-td">\${r.code}</td>
         <td class="url-td" title="\${escHtml(r.url)}">\${escHtml(r.url)}</td>
-        <td class="clicks-td \${clicksClass(clicks)}">\${clicks}</td>
+        <td class="clicks-td \${clicksClass(clicks)}">\${clicksDisplay}</td>
         <td>
           <button class="row-edit-btn" onclick="startEdit('\${r.code}')">编辑</button>
           <button class="row-reset-btn" onclick="resetClicks('\${r.code}')">清零</button>
@@ -742,19 +798,28 @@ const HTML = `<!DOCTYPE html>
 
   async function saveEdit(code) {
     const newUrl = document.getElementById('edit-input-' + code)?.value.trim();
+    const maxClicksRaw = document.getElementById('edit-max-' + code)?.value.trim();
     if (!newUrl || !/^https?:\\/\\//.test(newUrl)) {
       alert('请输入合法的网址');
       return;
     }
+    if (maxClicksRaw && (!/^\\d+$/.test(maxClicksRaw) || Number(maxClicksRaw) <= 0)) {
+      alert('最大访问次数必须是大于 0 的整数');
+      return;
+    }
+    const maxClicks = maxClicksRaw ? Number(maxClicksRaw) : null;
     const res = await fetch('/admin/update', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-      body: JSON.stringify({ code, newUrl })
+      body: JSON.stringify({ code, newUrl, maxClicks })
     });
     const data = await res.json();
     if (data.ok) {
       const rec = allRecords.find(r => r.code === code);
-      if (rec) rec.url = newUrl;
+      if (rec) {
+        rec.url = newUrl;
+        rec.maxClicks = maxClicks;
+      }
       editingCode = null;
       renderTable();
     } else {
